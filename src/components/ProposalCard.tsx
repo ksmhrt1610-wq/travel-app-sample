@@ -2,7 +2,9 @@
 
 import { mapsDirectionsUrl } from "@/core/maps";
 import { restKind, type ReplanResult, type ReplanStep } from "@/core/replan";
+import type { Classification } from "@/core/policy";
 import type { Suggestion } from "@/core/suggest";
+import type { ResponseMode } from "@/core/types";
 import { formatDuration } from "@/core/time";
 import type { Block, Itinerary, PlanningContext } from "@/core/types";
 import { DiffList, DiffSummary } from "./DiffPanel";
@@ -90,12 +92,15 @@ interface Props {
   onRemoveMust: (blockId: string) => void;
   /** 空きができたときの提案を選んだ（提案として組み直す） */
   onApplySuggestion?: (s: Suggestion) => void;
+  /** 変更の重さ（重い変更は、理由を出して確認を求める） */
+  classification?: Classification;
+  mode?: ResponseMode;
 }
 
 /**
  * 再計画エンジンの提案を見せるカード。差分を確認し、確定ボタンで初めて旅程に反映する。
  */
-export function ProposalCard({ result, ctx, title, onConfirm, onCancel, onRemoveMust, onApplySuggestion }: Props) {
+export function ProposalCard({ result, ctx, title, onConfirm, onCancel, onRemoveMust, onApplySuggestion, classification, mode }: Props) {
   const events = result.steps.filter((s) => s.phase === "event" || s.phase === "tidy");
   const reduce = result.steps.filter((s) => s.phase === "reduce");
   const walkDiff = result.walkingBeforeM - result.walkingAfterM;
@@ -107,6 +112,22 @@ export function ProposalCard({ result, ctx, title, onConfirm, onCancel, onRemove
       <p className="mt-0.5 text-[13px] font-bold text-slate-800" data-testid="proposal-title">
         {title}
       </p>
+
+      {classification?.weight === "heavy" && (
+        <div className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950" data-testid="proposal-heavy">
+          <p className="font-extrabold">⚠ 重い変更のため、確認が必要です{mode === "auto" ? "（おまかせでも自動では反映しません）" : ""}</p>
+          <ul className="mt-0.5 list-disc pl-4 font-semibold">
+            {classification.reasons.map((r) => (
+              <li key={r}>{r}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {classification?.weight === "light" && mode === "manual" && (
+        <p className="mt-2 rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-700" data-testid="proposal-manual">
+          ✋ 手動モードのため、軽い変更も差分を見て確定します
+        </p>
+      )}
 
       {result.feasible ? (
         <p className="mt-2 rounded-lg bg-emerald-100 px-3 py-1.5 text-xs font-bold text-emerald-900" data-testid="proposal-ok">

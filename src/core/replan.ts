@@ -1,5 +1,6 @@
 import { findOpenSlot } from "./availability";
 import { replaceSpotOfBlock, swapPlanB } from "./actions";
+import { templateWriter, type Cause, type ExplanationWriter } from "./cause";
 import { diffItineraries, type DiffItem } from "./diff";
 import { createFixedBlock, isGroupWide, nextId } from "./fixed";
 import { haversineM, taxiMinutesFor, transitMinutesFor, walkMinutesFor } from "./geo";
@@ -40,7 +41,7 @@ import type { Block, BlockIssue, Day, FixedEvent, Itinerary, LatLng, MealSlot, P
 
 export type ReplanEvent =
   /** Plan B への切り替え（雨など）。切替済みなら元に戻る */
-  | { type: "plan-b"; blockIds: string[] }
+  | { type: "plan-b"; blockIds: string[]; /** 切り替える理由（雨・暑さ）。省略すると、ユーザー自身の操作 */ cause?: "rain" | "heat" }
   | { type: "delay"; minutes: number }
   | { type: "closure"; spotId: string; replacementSpotId?: string }
   | { type: "tired"; level: "light" | "heavy"; source?: "member" | "walk-limit" }
@@ -52,7 +53,7 @@ export type ReplanEvent =
   | { type: "skip"; blockIds: string[] }
   | { type: "restore"; blockId: string }
   /** スポットを1件足す（空きができたときの提案など）。afterBlockId が null なら、これから行く予定の先頭に入れる */
-  | { type: "add-spot"; spotId: string; afterBlockId: string | null; label?: "optional" | "normal" }
+  | { type: "add-spot"; spotId: string; afterBlockId: string | null; label?: "optional" | "normal"; cause?: "detour" }
   /** 休憩を1件足す（駅の近くで待つなど）。spotId を省くと場所を決めない休憩 */
   | { type: "add-rest"; afterBlockId: string | null; minutes: number; spotId?: string };
 
@@ -63,6 +64,8 @@ export interface ReplanOptions {
   nowMin?: number;
   /** ユーザーが確認して「削ってよい」とした Must・食事のブロック ID */
   removeMustIds?: string[];
+  /** 変更理由を文章にするもの（省略するとテンプレート） */
+  writer?: ExplanationWriter;
 }
 
 export type StepKind =
@@ -93,6 +96,8 @@ export interface ReplanStep {
   kind: StepKind;
   blockIds: string[];
   detail?: string;
+  /** この手順の理由（削減は、解消した問題から求める） */
+  cause?: Cause;
 }
 
 export interface Violation {
@@ -461,6 +466,59 @@ function reorderNearest(day: Day, ctx: PlanningContext, now: number | undefined,
   return { day: cur, moved };
 }
 
+/* ---------- 理由（cause）の特定 ---------- */
+
+const ISSUE_WEIGHT: Record<BlockIssue, number> = {
+  "fixed-missed": 5,
+  "after-last-transport": 4,
+  "outside-hours": 3,
+  "outside-meal-window": 3,
+  "over-day-end": 1,
+  closed: 0,
+};
+
+function causeOfIssue(b: Block, issue: BlockIssue, day: Day): Cause | null {
+  const endsDay = day.blocks.find((x) => x.fixed?.endsDay && !isInert(x))?.fixed;
+  switch (issue) {
+    case "fixed-missed":
+      return b.fixed ? { kind: "fixed", fixedId: b.fixed.id } : null;
+    case "after-last-transport":
+      return endsDay ? { kind: "fixed", fixedId: endsDay.id } : null;
+    case "outside-hours":
+      return b.spotId ? { kind: "closing", spotId: b.spotId } : null;
+    case "outside-meal-window":
+      return b.meal ? { kind: "meal-window", slot: b.meal } : null;
+    case "over-day-end":
+      return { kind: "day-end", endMin: day.endMin };
+    default:
+      return null;
+  }
+}
+
+/**
+ * 削減の理由。この手順で解消した（または軽くなった）問題のうち、最も重いものを理由にする。
+ * 例: 光明禅寺（閉館 16:30）に間に合わせるために手前の予定を削ったなら、closing:光明禅寺。
+ */
+function resolveCause(before: Day, after: Day): Cause {
+  const aMap = new Map(after.blocks.map((b) => [b.id, b]));
+  let best: { w: number; cause: Cause } | null = null;
+  let fallback: { w: number; cause: Cause } | null = null;
+  for (const b of before.blocks) {
+    for (const issue of b.issues ?? []) {
+      const cause = causeOfIssue(b, issue, before);
+      if (!cause) continue;
+      const w = ISSUE_WEIGHT[issue] * 10000 + (b.lateByMin ?? 0);
+      if (!fallback || w > fallback.w) fallback = { w, cause };
+      const a = aMap.get(b.id);
+      const still = !!a && !isInert(a) && !!a.issues?.includes(issue);
+      const lighter = still && (a!.lateByMin ?? 0) < (b.lateByMin ?? 0);
+      if (still && !lighter) continue;
+      if (!best || w > best.w) best = { w, cause };
+    }
+  }
+  return (best ?? fallback)?.cause ?? { kind: "day-end", endMin: before.endMin };
+}
+
 /* ---------- 時間が足りないときの調整（削減の順序はここで固定） ---------- */
 
 interface SettleEnv {
@@ -495,7 +553,8 @@ function settle(start: Day, env: SettleEnv): Settled {
     const tidy = day.blocks.slice(endIdx + 1).filter((b) => b.label === "buffer" && !isInert(b)).map((b) => b.id);
     if (tidy.length) {
       day = dropIds(day, tidy);
-      steps.push({ phase: "tidy", kind: "tidy", blockIds: tidy, detail: "最終便のあとの余白" });
+      const endFixed = day.blocks[endIdx].fixed!;
+      steps.push({ phase: "tidy", kind: "tidy", blockIds: tidy, detail: "最終便のあとの余白", cause: { kind: "fixed", fixedId: endFixed.id } });
     }
   }
 
@@ -503,7 +562,7 @@ function settle(start: Day, env: SettleEnv): Settled {
   if (env.reorder) {
     const r = reorderNearest(day, ctx, now, rc);
     day = r.day;
-    if (r.moved.length) steps.push({ phase: "event", kind: "reorder", blockIds: r.moved, detail: "近い順" });
+    if (r.moved.length) steps.push({ phase: "event", kind: "reorder", blockIds: r.moved, detail: "近い順", cause: { kind: "tired" } });
   }
 
   let cur = badness(day, now);
@@ -521,13 +580,15 @@ function settle(start: Day, env: SettleEnv): Settled {
       }
     }
     if (!hit) break;
+    const cause = resolveCause(day, hit.trial);
     day = hit.trial;
     cur = hit.bad;
-    steps.push({ phase: "reduce", kind: "drop-optional", blockIds: [hit.b.id] });
+    steps.push({ phase: "reduce", kind: "drop-optional", blockIds: [hit.b.id], cause });
   }
 
   /** 滞在時間を、最低滞在時間まで 5 分刻みで短縮する。対象は pick が true のブロック。余裕が最大のものから */
-  const shortenLoop = (pick: (b: Block) => boolean, record: Map<string, { from: number; to: number }>) => {
+  type ShortenRec = { from: number; to: number; cause: Cause };
+  const shortenLoop = (pick: (b: Block) => boolean, record: Map<string, ShortenRec>) => {
     for (let guard = 0; cur > 0 && guard < 400; guard++) {
       let best: { id: string; trial: Day; bad: number; room: number; idx: number } | null = null;
       day.blocks.forEach((b, idx) => {
@@ -546,7 +607,7 @@ function settle(start: Day, env: SettleEnv): Settled {
       const before = day.blocks.find((b) => b.id === chosen.id)!.durationMin;
       const after = chosen.trial.blocks.find((b) => b.id === chosen.id)!.durationMin;
       const prevRec = record.get(chosen.id);
-      record.set(chosen.id, { from: prevRec?.from ?? before, to: after });
+      record.set(chosen.id, { from: prevRec?.from ?? before, to: after, cause: resolveCause(day, chosen.trial) });
       day = chosen.trial;
       cur = chosen.bad;
     }
@@ -554,7 +615,7 @@ function settle(start: Day, env: SettleEnv): Settled {
 
   // 2. 食事以外のスポットの滞在時間を短縮
   const shortenAt = steps.length; // 短縮の記録は、Optional の削除のあと・標準の削除の前に入れる
-  const shortened = new Map<string, { from: number; to: number }>();
+  const shortened = new Map<string, ShortenRec>();
   shortenLoop((b) => !b.meal, shortened);
 
   // 3. 標準を、後ろから削除（食事は削除しない）
@@ -570,16 +631,17 @@ function settle(start: Day, env: SettleEnv): Settled {
       }
     }
     if (!hit) break;
+    const cause = resolveCause(day, hit.trial);
     day = hit.trial;
     cur = hit.bad;
-    steps.push({ phase: "reduce", kind: "drop-standard", blockIds: [hit.b.id] });
+    steps.push({ phase: "reduce", kind: "drop-standard", blockIds: [hit.b.id], cause });
   }
 
   // 4. 食事の調整。窓の中で時刻をずらす（再計算で自動）→ 滞在を最低滞在まで短縮 → 近くの別の店に差し替え
-  const mealShortened = new Map<string, { from: number; to: number }>();
+  const mealShortened = new Map<string, ShortenRec>();
   shortenLoop((b) => !!b.meal, mealShortened);
   const mealSteps: ReplanStep[] = [];
-  for (const [id, r] of mealShortened) mealSteps.push({ phase: "reduce", kind: "meal-shorten", blockIds: [id], detail: `${r.from}分 → ${r.to}分` });
+  for (const [id, r] of mealShortened) mealSteps.push({ phase: "reduce", kind: "meal-shorten", blockIds: [id], detail: `${r.from}分 → ${r.to}分`, cause: r.cause });
 
   const used = new Set<string>([...env.otherUsed, ...env.closed]);
   for (const b of day.blocks) if (b.spotId) used.add(b.spotId);
@@ -602,10 +664,11 @@ function settle(start: Day, env: SettleEnv): Settled {
       if (hit) break;
     }
     if (!hit) break;
+    const cause = resolveCause(day, hit.trial);
     day = hit.trial;
     cur = hit.bad;
     used.add(day.blocks.find((x) => x.id === hit!.id)!.spotId!);
-    mealSteps.push({ phase: "reduce", kind: "meal-replace", blockIds: [hit.id], detail: `${hit.from} → ${hit.to}` });
+    mealSteps.push({ phase: "reduce", kind: "meal-replace", blockIds: [hit.id], detail: `${hit.from} → ${hit.to}`, cause });
   }
 
   // 結局スキップされたブロックは、短縮の記録から外して元の滞在時間に戻す（あとで取り消したときに短いままにならないように）
@@ -616,7 +679,7 @@ function settle(start: Day, env: SettleEnv): Settled {
       const r = shortened.get(b.id) ?? mealShortened.get(b.id);
       if (!r) return b;
       if (b.skip === "skipped") return { ...b, durationMin: r.from };
-      if (shortened.has(b.id)) shortenSteps.push({ phase: "reduce", kind: "shorten", blockIds: [b.id], detail: `${r.from}分 → ${r.to}分` });
+      if (shortened.has(b.id)) shortenSteps.push({ phase: "reduce", kind: "shorten", blockIds: [b.id], detail: `${r.from}分 → ${r.to}分`, cause: r.cause });
       return b;
     }),
   };
@@ -662,6 +725,8 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
     recomputeDay(d, ctx, { mode: "preserve", nowMin: now, marginMin: margin, minBufferMin, ...extra });
 
   /* ---- 1. イベントを適用する ---- */
+  /** 時刻がずれる・入れ替わるなど、イベントそのものによる変更の理由 */
+  let eventCause: Cause = { kind: "user" };
   let delayMin = 0;
   let tiredPlan: { minutes: number; radiusM: number; heavy: boolean; source?: "member" | "walk-limit" } | null = null;
 
@@ -677,12 +742,14 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
           return swapPlanB(b, ctx, now);
         }),
       };
-      steps.push({ phase: "event", kind: "plan-b", blockIds: changed });
+      eventCause = { kind: event.cause ?? "user" };
+      steps.push({ phase: "event", kind: "plan-b", blockIds: changed, cause: eventCause });
       break;
     }
     case "delay":
       delayMin = event.minutes;
-      steps.push({ phase: "event", kind: "delay", blockIds: [], detail: `${event.minutes}分` });
+      eventCause = { kind: "delay" };
+      steps.push({ phase: "event", kind: "delay", blockIds: [], detail: `${event.minutes}分`, cause: eventCause });
       break;
     case "closure": {
       if (!work.closedSpotIds.includes(event.spotId)) work.closedSpotIds.push(event.spotId);
@@ -695,10 +762,12 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
           return event.replacementSpotId ? replaceSpotOfBlock(b, event.replacementSpotId, ctx) : { ...b, closed: true };
         }),
       };
-      steps.push({ phase: "event", kind: event.replacementSpotId ? "replace" : "closure", blockIds: hit });
+      eventCause = { kind: "closure", spotId: event.spotId };
+      steps.push({ phase: "event", kind: event.replacementSpotId ? "replace" : "closure", blockIds: hit, cause: eventCause });
       break;
     }
     case "tired":
+      eventCause = { kind: "rest" };
       tiredPlan = {
         minutes: REST_MINUTES[event.level],
         radiusM: REST_RADIUS_M[event.level],
@@ -722,7 +791,8 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
       } else {
         day = { ...target, memberFixed: [...(target.memberFixed ?? []), ev] };
       }
-      steps.push({ phase: "event", kind: "fixed-add", blockIds: [ev.id], detail: ev.title });
+      eventCause = { kind: "fixed", fixedId: ev.id };
+      steps.push({ phase: "event", kind: "fixed-add", blockIds: [ev.id], detail: ev.title, cause: eventCause });
       break;
     }
     case "fixed-remove": {
@@ -731,7 +801,7 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
         blocks: day.blocks.filter((b) => b.id !== event.fixedId),
         memberFixed: (day.memberFixed ?? []).filter((f) => f.id !== event.fixedId),
       };
-      steps.push({ phase: "event", kind: "fixed-remove", blockIds: [event.fixedId] });
+      steps.push({ phase: "event", kind: "fixed-remove", blockIds: [event.fixedId], cause: { kind: "user" } });
       break;
     }
     case "fixed-move": {
@@ -745,23 +815,26 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
         ),
         memberFixed: (day.memberFixed ?? []).map((f) => (f.id === event.fixedId ? move(f) : f)),
       };
-      steps.push({ phase: "event", kind: "fixed-move", blockIds: [event.fixedId], detail: `${hm(event.timeMin)} に変更` });
+      eventCause = { kind: "fixed", fixedId: event.fixedId };
+      steps.push({ phase: "event", kind: "fixed-move", blockIds: [event.fixedId], detail: `${hm(event.timeMin)} に変更`, cause: eventCause });
       break;
     }
     case "margin":
       margin = event.marginMin;
       work.settings.marginMin = margin;
-      steps.push({ phase: "event", kind: "margin", blockIds: [], detail: `${margin}分` });
+      const fixedBlock = day.blocks.find((b) => b.fixed && !isInert(b));
+      eventCause = fixedBlock?.fixed ? { kind: "fixed", fixedId: fixedBlock.fixed.id } : { kind: "user" };
+      steps.push({ phase: "event", kind: "margin", blockIds: [], detail: `${margin}分`, cause: eventCause });
       break;
     case "skip": {
       const ids = new Set(event.blockIds);
       day = { ...day, blocks: day.blocks.map((b) => (ids.has(b.id) ? { ...b, skip: "skipped" as const } : b)) };
-      steps.push({ phase: "event", kind: "skip", blockIds: [...ids] });
+      steps.push({ phase: "event", kind: "skip", blockIds: [...ids], cause: { kind: "user" } });
       break;
     }
     case "restore":
       day = { ...day, blocks: day.blocks.map((b) => (b.id === event.blockId ? { ...b, skip: undefined } : b)) };
-      steps.push({ phase: "event", kind: "restore", blockIds: [event.blockId] });
+      steps.push({ phase: "event", kind: "restore", blockIds: [event.blockId], cause: { kind: "user" } });
       break;
     case "add-spot": {
       const sp = ctx.spotById.get(event.spotId);
@@ -778,14 +851,16 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
         travelMode: "none",
       };
       day = insertAfter(day, ctx, now, event.afterBlockId, block);
-      steps.push({ phase: "event", kind: "add-spot", blockIds: [id], detail: sp.name });
+      eventCause = { kind: event.cause ?? "detour" };
+      steps.push({ phase: "event", kind: "add-spot", blockIds: [id], detail: sp.name, cause: eventCause });
       break;
     }
     case "add-rest": {
       const id = nextId(allBlockIds(work), "r");
       const sp = event.spotId ? ctx.spotById.get(event.spotId) : undefined;
       day = insertAfter(day, ctx, now, event.afterBlockId, makeRestBlock(id, event.minutes, 0, sp?.id));
-      steps.push({ phase: "event", kind: "insert-rest", blockIds: [id], detail: sp?.name });
+      eventCause = { kind: "rest" };
+      steps.push({ phase: "event", kind: "insert-rest", blockIds: [id], detail: sp?.name, cause: { kind: "user" } });
       break;
     }
   }
@@ -808,7 +883,7 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
     if (opts.removeMustIds?.length) {
       const ids = opts.removeMustIds.filter((id) => d.blocks.some((b) => b.id === id && (b.label === "must" || b.meal)));
       d = { ...d, blocks: d.blocks.map((b) => (ids.includes(b.id) ? { ...b, skip: "skipped" as const } : b)) };
-      if (ids.length) pre.push({ phase: "event", kind: "drop-must", blockIds: ids, detail: "確認済み" });
+      if (ids.length) pre.push({ phase: "event", kind: "drop-must", blockIds: ids, detail: "確認済み", cause: { kind: "user" } });
     }
     return { settled: settle(rc(d, { delayMin }), env), pre };
   };
@@ -821,12 +896,12 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
     const placements = restPlacements(work, base, ctx, now, tiredPlan.minutes, tiredPlan.radiusM);
     const candidates = placements.map((pl) => {
       let d = pl.day;
-      const eventSteps: ReplanStep[] = [{ phase: "event", kind: "insert-rest", blockIds: [pl.blockId], detail: pl.spot?.name }];
+      const eventSteps: ReplanStep[] = [{ phase: "event", kind: "insert-rest", blockIds: [pl.blockId], detail: pl.spot?.name, cause: { kind: "tired" } }];
       if (heavy) {
         // かなり疲れた: 残りの Optional は削る
         const optionals = d.blocks.filter((b) => b.label === "optional" && !b.meal && movable(b, now)).map((b) => b.id);
         d = { ...d, blocks: d.blocks.map((b) => (optionals.includes(b.id) ? { ...b, skip: "skipped" as const } : b)) };
-        if (optionals.length) eventSteps.push({ phase: "event", kind: "drop-optional", blockIds: optionals, detail: "かなり疲れた" });
+        if (optionals.length) eventSteps.push({ phase: "event", kind: "drop-optional", blockIds: optionals, detail: "かなり疲れた", cause: { kind: "tired" } });
       }
       const r = finish(d);
       return { pl, eventSteps, ...r, loss: lossOf(itin.days[di], r.settled.day) };
@@ -902,13 +977,22 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
 
   const violations = collectViolations(finalized, ctx, now);
   const suggestions = suggestForGap(itin, after, ctx, { dayIndex: di, nowMin: now });
+
+  // 差分のすべての変更に、理由（cause）とその文章を付ける
+  const writer = opts.writer ?? templateWriter;
+  const blockCause = new Map<string, Cause>();
+  for (const st of steps) if (st.cause) for (const id of st.blockIds) blockCause.set(id, st.cause);
+  const diff = diffItineraries(itin, after).map((item): DiffItem => {
+    const cause = blockCause.get(item.blockId) ?? eventCause;
+    return { ...item, cause, reason: writer.explain(cause, ctx, after) };
+  });
   return {
     event,
     dayIndex: di,
     before: itin,
     after,
     steps,
-    diff: diffItineraries(itin, after),
+    diff,
     violations,
     feasible: violations.length === 0,
     mustCandidates,
@@ -974,18 +1058,4 @@ export function describeEvent(event: ReplanEvent, ctx: PlanningContext, itin: It
     case "restore":
       return `スキップを取り消す`;
   }
-}
-
-/**
- * 確認なしでそのまま反映してよい変更か。
- * 余裕時間の変更・固定時刻を外すだけで、何も削らず、問題も出ないとき。
- * それ以外（雨・遅延・休業・疲れた・固定時刻の追加など）は、必ず差分を見せて確定ボタンで反映する。
- */
-export function isQuietChange(result: ReplanResult): boolean {
-  return (
-    (result.event.type === "margin" || result.event.type === "fixed-remove") &&
-    result.feasible &&
-    result.mustCandidates.length === 0 &&
-    result.steps.every((s) => s.phase === "event")
-  );
 }

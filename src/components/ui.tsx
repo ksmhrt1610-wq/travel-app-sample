@@ -105,18 +105,45 @@ export function Sheet({
   );
 }
 
-/** 画面下に一時的に出すメッセージ */
+/** トーストの「元に戻す」などのボタン */
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
+/** 元に戻すボタンを出しておく時間（ミリ秒） */
+export const UNDO_TOAST_MS = 10000;
+
+/** 画面下に一時的に出すメッセージ。action を付けると、ボタンつきで長め（既定10秒）に出す */
 export function useToast(durationMs = 2600) {
-  const [message, setMessage] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; action?: ToastAction; ms: number; key: number } | null>(null);
   useEffect(() => {
-    if (!message) return;
-    const t = setTimeout(() => setMessage(null), durationMs);
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), toast.ms);
     return () => clearTimeout(t);
-  }, [message, durationMs]);
-  const node = message ? (
+  }, [toast]);
+  const show = (message: string | null, opts?: { action?: ToastAction; durationMs?: number }) =>
+    setToast(message ? { message, action: opts?.action, ms: opts?.durationMs ?? (opts?.action ? UNDO_TOAST_MS : durationMs), key: Date.now() } : null);
+  const node = toast ? (
     <div className="pointer-events-none fixed inset-x-0 bottom-[7.5rem] z-[60] mx-auto flex max-w-md justify-center px-4" role="status" data-testid="toast">
-      <div className="animate-pop-in rounded-full bg-slate-900/90 px-4 py-2 text-sm font-semibold text-white shadow-lg">{message}</div>
+      <div className="animate-pop-in pointer-events-auto flex max-w-full items-center gap-3 rounded-full bg-slate-900/90 py-2 pl-4 pr-2 text-sm font-semibold text-white shadow-lg">
+        <span data-testid="toast-message">{toast.message}</span>
+        {toast.action && (
+          <button
+            type="button"
+            onClick={() => {
+              toast.action!.onClick();
+              setToast(null);
+            }}
+            className="shrink-0 rounded-full bg-white/15 px-3 py-1 text-sm font-bold text-amber-200 hover:bg-white/25"
+            data-testid="toast-action"
+          >
+            {toast.action.label}
+          </button>
+        )}
+        {!toast.action && <span className="pr-2" />}
+      </div>
     </div>
   ) : null;
-  return { show: setMessage, node };
+  return { show, node };
 }

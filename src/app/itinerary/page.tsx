@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { BlockDetailSheet } from "@/components/BlockDetailSheet";
 import { FixedTimesPanel, MembersCard } from "@/components/FixedTimesPanel";
+import { DiffPanel } from "@/components/DiffPanel";
+import { ModeSwitch } from "@/components/ModeSwitch";
 import { ProposalCard } from "@/components/ProposalCard";
 import { ShareDialog } from "@/components/ShareDialog";
 import { Timeline } from "@/components/Timeline";
@@ -20,9 +22,11 @@ import {
 } from "@/core/labels";
 import { needsPlanB } from "@/core/planb";
 import { planBWarnings } from "@/core/planner";
-import { describeEvent, isQuietChange, replan, type ReplanEvent, type ReplanResult } from "@/core/replan";
+import { commitItinerary, commitResult, itineraryChanged, undoLast } from "@/core/history";
+import { classifyChange, decideApply, modeOf, type Classification } from "@/core/policy";
+import { describeEvent, replan, type ReplanEvent, type ReplanResult } from "@/core/replan";
 import { formatDateJa } from "@/core/time";
-import type { BlockLabel, Itinerary, Member } from "@/core/types";
+import type { BlockLabel, Itinerary, Member, ResponseMode } from "@/core/types";
 import { useTrip } from "@/store/tripStore";
 import { usePlanningContext } from "@/store/usePlanningContext";
 
@@ -31,6 +35,7 @@ interface Proposal {
   title: string;
   result: ReplanResult;
   removeMustIds: string[];
+  classification: Classification;
 }
 
 export default function ItineraryPage() {
@@ -71,25 +76,57 @@ export default function ItineraryPage() {
     );
   }
 
-  const commit = (next: Itinerary, message?: string) => {
+  const mode: ResponseMode = modeOf(itinerary);
+  const history = trip.history ?? [];
+
+  const undo = () => {
     // 旅程を編集したら、当日モードの作業コピーは作り直す
-    update((t) => ({ ...t, itinerary: next, today: undefined }));
-    if (message) toast.show(message);
+    update((t) => (t.itinerary ? { ...t, ...undoLast({ itinerary: t.itinerary, history: t.history ?? [] }), today: undefined } : t));
+    setProposal(null);
+    toast.show("元に戻しました");
   };
 
-  /** 再計画エンジンの提案を作る。確定するまで旅程は変わらない */
+  const announce = (message: string, changed = true) => toast.show(message, changed ? { action: { label: "元に戻す", onClick: undo } } : undefined);
+
+  /** 組み直しの結果を反映する（元に戻せる） */
+  const commitPlan = (result: ReplanResult, title: string, weight: Classification["weight"]) => {
+    update((t) => (t.itinerary ? { ...t, ...commitResult({ itinerary: t.itinerary, history: t.history ?? [] }, result, { atMin: 0, title, weight }), today: undefined } : t));
+    announce(weight === "light" ? `反映しました：${title}` : "確定して、旅程に反映しました", itineraryChanged(result.before, result.after));
+    setProposal(null);
+  };
+
+  /** 並べ替え・メンバー変更など、組み直しではない編集を反映する（元に戻せる） */
+  const commit = (next: Itinerary, title: string, message?: string) => {
+    update((t) => (t.itinerary ? { ...t, ...commitItinerary({ itinerary: t.itinerary, history: t.history ?? [] }, next, { atMin: 0, title }), today: undefined } : t));
+    announce(message ?? `反映しました：${title}`);
+  };
+
+  const setMode = (m: ResponseMode) => {
+    const withMode = (i: Itinerary): Itinerary => ({ ...i, settings: { ...i.settings, mode: m } });
+    update((t) => ({
+      ...t,
+      itinerary: t.itinerary ? withMode(t.itinerary) : t.itinerary,
+      today: t.today ? { ...t.today, itinerary: withMode(t.today.itinerary) } : t.today,
+    }));
+  };
+
+  /**
+   * 再計画エンジンの提案を作る。重い変更・手動モードは、差分を見せて確定を求める（確定するまで旅程は変わらない）。
+   * 軽い変更（提案・おまかせ）は、そのまま反映して「元に戻す」を出す。
+   */
   const propose = (event: ReplanEvent, removeMustIds: string[] = []) => {
     const result = replan(itinerary, event, ctx, { dayIndex: day.index, removeMustIds });
     const title = describeEvent(event, ctx, itinerary);
-    if (isQuietChange(result)) {
-      commit(result.after, "反映しました");
+    const classification = classifyChange(result, ctx);
+    if (decideApply(mode, classification.weight) === "apply") {
+      commitPlan(result, title, classification.weight);
       return;
     }
-    setProposal({ event, title, result, removeMustIds });
+    setProposal({ event, title, result, removeMustIds, classification });
   };
 
   const handleReorder = (from: number, to: number) => {
-    commit(reorderBlocks(itinerary, day.index, from, to, ctx), "並べ替えて、時刻を計算し直しました");
+    commit(reorderBlocks(itinerary, day.index, from, to, ctx), "並べ替え", "並べ替えて、時刻を計算し直しました");
   };
 
   const move = (id: string, dir: -1 | 1) => {
@@ -105,14 +142,17 @@ export default function ItineraryPage() {
 
   const changeMembers = (members: Member[]) => {
     const ids = new Set(members.map((m) => m.id));
-    commit({
-      ...itinerary,
-      members,
-      days: itinerary.days.map((d) => ({
-        ...d,
-        memberFixed: d.memberFixed?.map((f) => ({ ...f, memberIds: f.memberIds?.filter((id) => ids.has(id)) ?? null })).filter((f) => !f.memberIds || f.memberIds.length > 0),
-      })),
-    });
+    commit(
+      {
+        ...itinerary,
+        members,
+        days: itinerary.days.map((d) => ({
+          ...d,
+          memberFixed: d.memberFixed?.map((f) => ({ ...f, memberIds: f.memberIds?.filter((id) => ids.has(id)) ?? null })).filter((f) => !f.memberIds || f.memberIds.length > 0),
+        })),
+      },
+      "メンバーを変更",
+    );
   };
 
   const selected = selectedId ? day.blocks.find((b) => b.id === selectedId) ?? null : null;
@@ -186,6 +226,7 @@ export default function ItineraryPage() {
       )}
 
       <div className="mt-3 space-y-3">
+        <ModeSwitch mode={mode} onChange={setMode} />
         <MembersCard members={itinerary.members} onChange={changeMembers} />
         <FixedTimesPanel itinerary={itinerary} ctx={ctx} dayIndex={day.index} onPropose={(e) => propose(e)} />
       </div>
@@ -197,6 +238,12 @@ export default function ItineraryPage() {
               ⚠ {w}
             </p>
           ))}
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <div className="mt-3">
+          <DiffPanel history={history} ctx={ctx} itin={itinerary} onUndo={undo} />
         </div>
       )}
 
@@ -252,17 +299,16 @@ export default function ItineraryPage() {
             result={proposal.result}
             ctx={ctx}
             title={proposal.title}
-            onConfirm={() => {
-              commit(proposal.result.after, "確定して、旅程に反映しました");
-              setProposal(null);
-            }}
+            onConfirm={() => commitPlan(proposal.result, proposal.title, proposal.classification.weight)}
             onCancel={() => setProposal(null)}
             onRemoveMust={(blockId) => propose(proposal.event, [...proposal.removeMustIds, blockId])}
+            classification={proposal.classification}
+            mode={mode}
             onApplySuggestion={(s) => {
               const base = proposal.result.after;
-              commit(base, "確定して、旅程に反映しました");
+              commitPlan(proposal.result, proposal.title, proposal.classification.weight);
               const result = replan(base, s.event, ctx, { dayIndex: day.index });
-              setProposal({ event: s.event, title: describeEvent(s.event, ctx, base), result, removeMustIds: [] });
+              setProposal({ event: s.event, title: describeEvent(s.event, ctx, base), result, removeMustIds: [], classification: classifyChange(result, ctx) });
             }}
           />
         )}

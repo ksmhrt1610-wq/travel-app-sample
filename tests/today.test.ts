@@ -4,7 +4,7 @@ import { diffItineraries, summarizeDiff } from "@/core/diff";
 import { generateItinerary } from "@/core/planner";
 import { replan, type ReplanEvent } from "@/core/replan";
 import { getNextAction } from "@/core/today";
-import { detectRainImpact, type HourlyWeather } from "@/core/weather";
+import { detectRainImpact, exceedsRainRule, RAIN_RULES, RAIN_STRENGTH, rainMm, type HourlyWeather, type RainStrength } from "@/core/weather";
 import type { Itinerary } from "@/core/types";
 import { demoPrefs, hm, makeCtx, SATURDAY } from "./helpers";
 
@@ -81,28 +81,58 @@ describe("デモシナリオ: 雨 → 屋外予定を切り替える", () => {
   });
 });
 
-describe("雨の通知条件（雨への許容度）", () => {
+describe("雨の通知条件（雨への許容度と雨の強さ）", () => {
   const itin = demo();
-  const rain = (prob: number) => ({ startMin: hm(9), prob });
-  const count = (tol: Parameters<typeof detectRainImpact>[4], prob: number) =>
-    detectRainImpact(itin.days[0], ctx, sunny, hm(9), tol, rain(prob)).switchable.length;
+  const rain = (strength: RainStrength) => ({
+    startMin: hm(9),
+    prob: RAIN_STRENGTH[strength].prob,
+    mmPerHour: RAIN_STRENGTH[strength].mmPerHour,
+    strength,
+  });
+  const count = (tol: Parameters<typeof detectRainImpact>[4], strength: RainStrength) =>
+    detectRainImpact(itin.days[0], ctx, sunny, hm(9), tol, rain(strength)).switchable.length;
 
-  it("小雨ならOK: 降水確率が60%未満なら通知しない／60%以上なら通知する", () => {
-    expect(count("light-rain-ok", 40)).toBe(0);
-    expect(count("light-rain-ok", 80)).toBeGreaterThan(0);
+  it("基準は定数1か所にまとまっている（屋外NG 0.5mm/h または30%・小雨OK 3mm/h・気にしない 10mm/h）", () => {
+    expect(RAIN_RULES["no-outdoor"]).toEqual({ mmPerHour: 0.5, precipProb: 30 });
+    expect(RAIN_RULES["light-rain-ok"].mmPerHour).toBe(3);
+    expect(RAIN_RULES["dont-care"].mmPerHour).toBe(10);
   });
 
-  it("屋外NG: 30%以上で通知。半屋外も対象になる", () => {
-    expect(count("no-outdoor", 20)).toBe(0);
-    expect(count("no-outdoor", 40)).toBeGreaterThanOrEqual(count("light-rain-ok", 80));
+  it("屋外NG: 小雨（1mm/h）でも通知する。降水確率が30%以上でも、雨量が少なくても通知する", () => {
+    expect(count("no-outdoor", "light")).toBeGreaterThan(0);
+    expect(exceedsRainRule(RAIN_RULES["no-outdoor"], 30, 0)).toBe(true);
+    expect(exceedsRainRule(RAIN_RULES["no-outdoor"], 20, 0.4)).toBe(false);
+    expect(exceedsRainRule(RAIN_RULES["no-outdoor"], 10, 0.5)).toBe(true);
   });
 
-  it("気にしない: 自動の通知は出さない", () => {
-    expect(count("dont-care", 100)).toBe(0);
+  it("小雨ならOK: 小雨（1mm/h）は通知せず、本降り（5mm/h）から通知する。降水確率だけでは通知しない", () => {
+    expect(count("light-rain-ok", "light")).toBe(0);
+    expect(count("light-rain-ok", "moderate")).toBeGreaterThan(0);
+    expect(exceedsRainRule(RAIN_RULES["light-rain-ok"], 100, 2.9)).toBe(false);
+  });
+
+  it("気にしない: 強い雨（15mm/h）のときだけ提案する", () => {
+    expect(count("dont-care", "light")).toBe(0);
+    expect(count("dont-care", "moderate")).toBe(0);
+    expect(count("dont-care", "heavy")).toBeGreaterThan(0);
+  });
+
+  it("強い雨ほど、通知される許容度の範囲が広い（屋外NG ⊇ 小雨OK ⊇ 気にしない）", () => {
+    for (const s of ["light", "moderate", "heavy"] as RainStrength[]) {
+      expect(count("no-outdoor", s)).toBeGreaterThanOrEqual(count("light-rain-ok", s));
+      expect(count("light-rain-ok", s)).toBeGreaterThanOrEqual(count("dont-care", s));
+    }
+  });
+
+  it("雨量が無い古い保存データ（降水確率だけ）でも、降水確率から雨量を見積もって判定できる", () => {
+    expect(rainMm({ startMin: 0, prob: 95 })).toBe(15);
+    expect(rainMm({ startMin: 0, prob: 80 })).toBe(5);
+    expect(rainMm({ startMin: 0, prob: 60 })).toBe(1);
+    expect(rainMm({ startMin: 0, prob: 20 })).toBeLessThan(0.5);
   });
 
   it("雨の開始時刻より前に終わる予定は対象外", () => {
-    const late = detectRainImpact(itin.days[0], ctx, sunny, hm(9), "light-rain-ok", { startMin: hm(23), prob: 90 });
+    const late = detectRainImpact(itin.days[0], ctx, sunny, hm(9), "light-rain-ok", { startMin: hm(23), prob: 90, mmPerHour: 15 });
     expect(late.switchable).toHaveLength(0);
   });
 });
@@ -117,7 +147,7 @@ describe("遅延と差分表示", () => {
     expect(summary.maxShiftMin).toBeLessThanOrEqual(90);
     for (const d of r.diff) expect(d.before.startMin).toBeGreaterThan(hm(13) - 1);
     // diff は旅程どうしの比較と一致する
-    expect(r.diff).toEqual(diffItineraries(itin, r.after));
+    expect(r.diff.map(({ cause: _c, reason: _r, ...rest }) => rest)).toEqual(diffItineraries(itin, r.after));
   });
 
   it("Plan B 切替の差分は replaced として、元と切替後のスポットを持つ", () => {

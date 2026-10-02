@@ -12,7 +12,7 @@ export interface SpotProvider {
   listSpots(): Promise<Spot[]>;
 }
 
-/** 天気予報。実装例: Open-Meteo / 気象庁 / OpenWeatherMap の時間別降水確率 */
+/** 天気予報。実装例: Open-Meteo / 気象庁 / OpenWeatherMap の時間別降水確率・雨量 */
 export interface WeatherProvider {
   getHourlyForecast(date: string, location: LatLng): Promise<HourlyWeather[]>;
 }

@@ -6,6 +6,7 @@ export const mockWeatherProvider: WeatherProvider = {
     return Array.from({ length: 24 }, (_, hour) => ({
       hour,
       precipProb: hour >= 12 && hour <= 17 ? 20 : 10,
+      mmPerHour: 0,
     }));
   },
 };

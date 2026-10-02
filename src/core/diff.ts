@@ -1,3 +1,4 @@
+import type { Cause } from "./cause";
 import type { Block, Itinerary } from "./types";
 
 export type DiffKind =
@@ -39,6 +40,9 @@ export interface DiffItem {
   /** 滞在時間の変化（短縮のとき）。分 */
   durationFrom?: number;
   durationTo?: number;
+  /** 変わった理由（組み直しの結果として付く）と、その文章 */
+  cause?: Cause;
+  reason?: string;
 }
 
 const side = (b: { spotId?: string; startMin: number; endMin: number }): DiffSide => ({
@@ -140,6 +144,15 @@ export function summarizeDiff(items: DiffItem[]): DiffSummary {
   return s;
 }
 
+/** 徒歩が長い移動への、公共交通・タクシーの提案（履歴に残す分） */
+export interface TravelNote {
+  fromName: string;
+  toName: string;
+  walkMin: number;
+  transitMin: number;
+  taxiMin: number;
+}
+
 /** UI に保存する変更履歴の1件 */
 export interface ChangeSet {
   id: string;
@@ -147,4 +160,12 @@ export interface ChangeSet {
   atMin: number;
   title: string;
   items: DiffItem[];
+  /** この変更を反映する前の旅程（「元に戻す」で、これに完全に戻る） */
+  before?: Itinerary;
+  /** 軽い変更（元に戻せる）か、重い変更（確認が必要）か */
+  weight?: "light" | "heavy";
+  /** アプリが自動で反映した（おまかせモード） */
+  auto?: boolean;
+  notes?: string[];
+  travel?: TravelNote[];
 }

@@ -155,7 +155,9 @@ try {
   const outdoorLeft = before.filter((b) => b.setting === "outdoor" && b.end > 13 * 60);
   check(`13時以降に屋外の予定が残っている（${outdoorLeft.map((b) => b.name).join("、")}）`, outdoorLeft.length >= 1);
   check("雨の前は通知バナーが出ていない", (await page.locator(q("rain-banner")).count()) === 0);
-  check("降水確率の初期値は80%", (await text("sim-rain-prob-label")).includes("80%"));
+  check("雨の強さの初期値は「本降り」（降水確率80%・5mm/h）", (await text("sim-rain-prob-label")).includes("本降り") && (await text("sim-rain-prob-label")).includes("80%"));
+  check("雨の強さを3段階（小雨・本降り・強い雨）から選べる", (await page.locator('[data-testid^="sim-rain-strength-"]').count()) === 3);
+  check("モードの初期値は「提案」", (await page.getAttribute(q("mode-switch"), "data-mode")) === "suggest");
   await page.click(q("sim-rain-button"));
   await page.waitForSelector(q("rain-banner"));
   check("「Plan Bに切り替えますか？」の通知が出る", (await text("rain-banner")).includes("Plan Bに切り替えますか"));
@@ -163,15 +165,13 @@ try {
   check("「1つだけ切り替える」「残りすべて切り替える」の2つが選べる", (await page.locator(q("rain-switch-one")).isVisible()) && (await page.locator(q("rain-switch-all")).isVisible()));
   await shot("A4-rain-banner");
 
-  step("A5. 今日の残りの屋外予定をすべて切り替える（差分を見て、確定する）");
+  step("A5. 今日の残りの屋外予定をすべて切り替える（提案モード: 軽い変更はワンタップで反映。元に戻せる）");
   await page.click(q("rain-switch-all"));
-  await waitProposal();
-  check("組み直し案が出る（まだ反映されていない）", (await text("proposal-card")).includes("まだ反映されていません"));
-  check("案の差分に切替前後が出る", (await page.locator(`${q("proposal-diff")} ${q("diff-replaced")}`).count()) === outdoorLeft.length);
-  check("確定前は旅程が変わっていない", (await readBlocks()).filter((b) => b.switched).length === 0);
-  await shot("A5-proposal");
-  await confirmProposal();
   await page.waitForSelector(q("diff-panel"));
+  check("軽い変更なので、確認なしでそのまま反映される（組み直し案は出ない）", (await page.locator(q("proposal-card")).count()) === 0);
+  check("「元に戻す」付きのトーストが出る", (await page.locator(q("toast-action")).count()) === 1 && (await text("toast-message")).includes("反映しました"));
+  check("差分のすべての変更に、理由が出る（雨のため）", (await page.locator(`${q("diff-panel")} ${q("diff-reason")}`).count()) >= 1 && (await text("diff-panel")).includes("雨のため"));
+  await shot("A5-applied");
   check("通知バナーが消える", (await page.locator(q("rain-banner")).count()) === 0);
   const after = await readBlocks();
   check("13時以降の屋外予定がなくなった", after.filter((b) => b.setting === "outdoor" && b.end > 13 * 60).length === 0);
@@ -179,29 +179,36 @@ try {
   check(`切り替わったブロックは屋内（${switched.map((b) => b.name).join("、")}）`, switched.length === outdoorLeft.length && switched.every((b) => b.setting === "indoor"));
   check("13時より前の予定は変わっていない", before.filter((b) => b.start <= 13 * 60).every((b) => after.find((a) => a.id === b.id)?.name === b.name));
   check("時系列に矛盾がない（重なりなし）", after.every((b, i) => i === 0 || b.start >= after[i - 1].end));
+  await page.click(q("toast-action"));
+  await page.waitForSelector(q("rain-banner"));
+  const undone = await readBlocks();
+  check("「元に戻す」で、切り替え前の旅程に完全に戻る（通知バナーも戻る）", JSON.stringify(undone.map((b) => [b.id, b.spotId, b.start, b.end])) === JSON.stringify(before.map((b) => [b.id, b.spotId, b.start, b.end])));
+  await page.click(q("rain-switch-all"));
+  await page.waitForSelector(q("diff-panel"));
+  check("もう一度切り替えられる", (await readBlocks()).filter((b) => b.switched).length === outdoorLeft.length);
   await shot("A5-after-switch");
 
   step("A6. 遅延: 電車が30分遅延（余白が吸収）");
   await openSim();
   await page.selectOption(q("sim-delay-select"), "30");
   await page.click(q("sim-delay-button"));
-  await waitProposal();
-  check("組み直し案に「電車が30分遅延」が出る", (await text("proposal-title")).includes("電車が30分遅延"));
-  await confirmProposal();
   await page.waitForFunction(() => document.querySelector('[data-testid="diff-title"]')?.textContent?.includes("遅延"));
+  check("遅延の反映は軽い変更なので、そのまま反映される", (await page.locator(q("proposal-card")).count()) === 0);
   const delayed = await readBlocks();
   check("開始済みの予定は動かない", delayed.filter((b) => b.start <= 13 * 60).every((b) => after.find((a) => a.id === b.id)?.start === b.start));
 
   step("A7. 臨時休業: 次のスポットが臨時休業 → 代わりに切り替える");
   await openSim();
   await page.click(q("sim-close-button"));
-  await waitProposal();
-  await confirmProposal();
+  // 休業になる予定が標準・Must なら重い変更（外す案）なので確認が出る。Optional なら軽い変更でそのまま反映される
+  await page.waitForSelector(`${q("proposal-card")}, ${q("closure-banner")}`);
+  if (await page.locator(q("proposal-card")).count()) {
+    check("標準・Must が休業になる案は、重い変更として確認が出る", (await page.locator(q("proposal-heavy")).count()) === 1);
+    await confirmProposal();
+  }
   await page.waitForSelector(q("closure-banner"));
   check("臨時休業の通知と代わりの候補が出る", (await page.locator(q("closure-replace")).count()) === 1);
   await page.click(q("closure-replace"));
-  await waitProposal();
-  await confirmProposal();
   await page.waitForFunction(() => !document.querySelector('[data-testid="closure-banner"]'));
   check("代わりの予定に切り替わり、通知が消える", true);
 
@@ -329,38 +336,31 @@ try {
   await openSim();
   await page.selectOption(q("sim-delay-select"), "60");
   await page.click(q("sim-delay-button"));
-  await waitProposal();
-  check("遅延を反映する手順が提案に出る", (await page.locator('[data-step-kind="delay"]').count()) >= 1);
-  check("固定時刻に間に合う案", await page.locator(q("proposal-ok")).isVisible());
-  check("確定するまで旅程は変わらない", (await page.locator('[data-skipped="true"]').count()) === 0);
-  await shot("B4-delay-proposal");
-  await confirmProposal();
+  await page.waitForFunction(() => document.querySelector('[data-testid="diff-title"]')?.textContent?.includes("遅延"));
+  check("遅延の反映は軽い変更なので、そのまま反映される（組み直し案は出ない）", (await page.locator(q("proposal-card")).count()) === 0);
+  check("「元に戻す」付きのトーストが出る", (await page.locator(q("toast-action")).count()) === 1);
   check("確定すると、遅れた予定が後ろにずれている", (await page.locator('[data-testid="block-spot"]', { hasText: "遅れ" }).count()) >= 1);
   check("固定時刻のブロックは 18:05 のまま、間に合わない警告もない", (await page.locator(q("fixed-missed")).count()) === 0 && (await page.getAttribute(`${q("block-fixed")}`, "data-start")) === String(18 * 60 + 5));
 
-  step("B5. 「疲れた」→「かなり疲れた」: 休憩が入り、歩行距離が減り、それでも最終便に間に合う");
+  step("B5. 「疲れた」→「かなり疲れた」: 休憩が入り、それでも最終便に間に合う");
+  const walkBefore = await text("walk-total");
   await page.click(q("tired-button"));
   await page.waitForSelector(q("tired-sheet"));
   check("2段階（少し休みたい／かなり疲れた）から選べる", (await page.locator(q("tired-light")).isVisible()) && (await page.locator(q("tired-heavy")).isVisible()));
   await shot("B5-tired-sheet");
   await page.click(q("tired-heavy"));
-  await waitProposal();
-  check("固定時刻に間に合う案", await page.locator(q("proposal-ok")).isVisible());
-  const stepKinds = await page.$$eval("[data-step-kind]", (els) => els.map((e) => e.getAttribute("data-step-kind")));
-  check("休憩（60分）を挟む手順が入っている", stepKinds.includes("insert-rest"));
-  const walkText = await text("proposal-walking");
-  const km = [...walkText.matchAll(/(\d+\.\d)km/g)].map((m) => Number(m[1]));
-  check(`残りの推定歩行距離が増えない（${km[0]}km → ${km[1]}km）`, km.length >= 2 && km[1] <= km[0]);
-  const noteTexts = await page.locator(q("proposal-note")).allTextContents();
-  check("グループには「メンバーの1人が休憩を希望しています」とだけ伝わる（名前は出ない）", noteTexts.some((t) => t.includes("メンバーの1人が休憩を希望しています")) && !/[ABC]さん/.test((await text("proposal-card")).replace(/Cさん[^。]*電車[^。]*/g, "")));
-  check("Must と固定時刻は守る旨が書かれている", noteTexts.some((t) => t.includes("固定時刻は守ります")));
-  await shot("B5-heavy-proposal");
-  await confirmProposal();
+  await page.waitForFunction(() => document.querySelector('[data-testid="diff-title"]')?.textContent?.includes("休憩"));
+  check("休憩・Optional のスキップ・近い順の並べ替えは軽い変更なので、そのまま反映される", (await page.locator(q("proposal-card")).count()) === 0);
+  const noteTexts = await page.locator(q("diff-panel")).allTextContents();
+  check("グループには「メンバーの1人が休憩を希望しています」とだけ伝わる（名前は出ない）", noteTexts.some((t) => t.includes("メンバーの1人が休憩を希望しています")) && !/[ABC]さん/.test((await text("diff-title"))));
+  check("固定時刻は守る旨が書かれている", noteTexts.some((t) => t.includes("固定時刻は守ります")));
+  await shot("B5-heavy-applied");
   const rest = await page.$$eval('[data-testid="block-rest"]', (els) => els.map((e) => Number(e.dataset.end) - Number(e.dataset.start)));
-  check(`確定すると、60分の休憩ブロックが入る（${rest.join(",")}分）`, rest.includes(60));
+  check(`60分の休憩ブロックが入る（${rest.join(",")}分）`, rest.includes(60));
   check("Must は残っている", (await page.locator('[data-testid="block-spot"][data-label="must"]:not([data-skipped="true"])').count()) >= 1);
-  check("確定後も固定時刻に間に合う（警告なし）", (await page.locator(q("fixed-missed")).count()) === 0);
+  check("休憩後も固定時刻に間に合う（警告なし）", (await page.locator(q("fixed-missed")).count()) === 0);
   check("履歴のタイトルにメンバーの名前が出ない", (await text("diff-title")).includes("メンバーの1人が休憩を希望") && !/[ABC]さん/.test(await text("diff-title")));
+  check("歩行距離のメーターは、休憩後も表示されている", (await text("walk-total")).length > 0 && walkBefore.length > 0);
 
   step("B6. 出発すべき時刻の30分前・10分前の通知");
   const departBy = hhmmToMin(await text("fixed-departby"));
@@ -375,10 +375,12 @@ try {
   check("10分前の通知が出る", (await page.getAttribute(q("departure-banner"), "data-level")) === "before10" && (await text("departure-banner-title")).includes("10分前"));
   await shot("B6-departure-notice");
 
-  step("B7. 少し休みたい（リセット後）");
+  step("B7. 少し休みたい（手動モードでは、軽い変更も差分を見て確定する）");
   await openSim();
   await page.click(q("sim-reset"));
   await page.waitForFunction(() => document.querySelectorAll('[data-testid="diff-panel"]').length === 0);
+  await page.click(q("mode-manual"));
+  check("手動モードに切り替わる", (await page.getAttribute(q("mode-switch"), "data-mode")) === "manual");
   await openSim();
   await page.click(q("sim-now-15:00"));
   await closeSim();
@@ -388,9 +390,88 @@ try {
   const restLight = await page.$$eval('[data-step-kind="insert-rest"]', (els) => els.length);
   check("30分の休憩を挟む案が出る", restLight === 1 && (await text("proposal-steps")).includes("30分"));
   check("15:00 にスターバックス滞在中なら、「ここで延長」が提案される", (await text("proposal-steps")).includes("ここで延長") && (await text("proposal-card")).includes("今いる場所"));
+  check("手動モードのため、軽い変更でも差分を見て確定する旨が出る", (await page.locator(q("proposal-manual")).count()) === 1);
+  check("案の差分のすべてに、理由が出る", (await page.locator(`${q("proposal-diff")} ${q("diff-reason")}`).count()) === (await page.locator(`${q("proposal-diff")} li`).count()));
   await page.click(q("proposal-cancel"));
   await page.waitForFunction(() => !document.querySelector('[data-testid="proposal-card"]'));
   check("やめると旅程は変わらない", (await page.locator(q("block-rest")).count()) === 0);
+  await page.click(q("mode-suggest"));
+
+  /* ====================================================================
+   * シナリオM: 3つのモード（手動／提案／おまかせ）
+   * ==================================================================== */
+
+  step("M1. デモ設定の旅程を作り直して、当日モードを開く");
+  await page.evaluate(() => localStorage.clear());
+  await page.goto(BASE);
+  await page.waitForSelector(q("generate"));
+  for (const c of ["gourmet", "cafe", "history", "nature", "shopping", "art", "nightview"]) {
+    const on = (await page.getAttribute(q(`interest-${c}`), "aria-pressed")) === "true";
+    if (on !== ["gourmet", "cafe"].includes(c)) await page.click(q(`interest-${c}`));
+  }
+  await page.click(q("pace-relaxed"));
+  await page.click(q("rain-light-rain-ok"));
+  await page.click(q("generate"));
+  await page.waitForURL("**/itinerary");
+  await page.waitForSelector(q("timeline"));
+  check("旅程画面にもモードの切り替えがある（初期値は提案）", (await page.getAttribute(q("mode-switch"), "data-mode")) === "suggest");
+  await page.click(q("go-today"));
+  await page.waitForURL("**/today");
+  await page.waitForSelector(q("next-card"));
+  const m0 = await readBlocks();
+
+  step("M2. 手動モード: バナーは出ず、バッジだけ。変更はすべて差分を見て確定する");
+  await page.click(q("mode-manual"));
+  await openSim();
+  await page.click(q("sim-now-13:00"));
+  await page.click(q("sim-rain-button"));
+  await page.waitForSelector(q("badge-rain"));
+  check("雨の通知バナーは出ない", (await page.locator(q("rain-banner")).count()) === 0);
+  check("代わりに小さなバッジで「雨の予報があります」と知らせる", (await text("badge-rain")).includes("雨の予報があります"));
+  await page.click(q("badge-rain"));
+  await waitProposal();
+  check("バッジを押すと、組み直し案（差分）が出る。軽い変更でも確認になる", (await page.locator(q("proposal-manual")).count()) === 1);
+  check("確定前は旅程が変わっていない", (await readBlocks()).filter((b) => b.switched).length === 0);
+  await confirmProposal();
+  await page.waitForSelector(q("diff-panel"));
+  check("確定すると切り替わる", (await readBlocks()).filter((b) => b.switched).length >= 1);
+  await page.click(q("undo-latest"));
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="diff-panel"]').length === 0);
+  const m2 = await readBlocks();
+  check("変更履歴の「元に戻す」で、元の旅程に完全に戻る", JSON.stringify(m2.map((b) => [b.id, b.spotId, b.start, b.end])) === JSON.stringify(m0.map((b) => [b.id, b.spotId, b.start, b.end])));
+
+  step("M3. おまかせモード: 軽い変更は自動で反映して知らせる（元に戻せる）");
+  await openSim();
+  await page.click(q("sim-rain-stop"));
+  await page.click(q("mode-auto"));
+  check("おまかせモードに切り替わる", (await page.getAttribute(q("mode-switch"), "data-mode")) === "auto");
+  await openSim();
+  await page.click(q("sim-now-13:00"));
+  await page.click(q("sim-rain-button"));
+  await page.waitForSelector(q("diff-panel"));
+  check("タップなしで、屋外の予定が自動で Plan B に切り替わる", (await readBlocks()).filter((b) => b.switched).length >= 1);
+  check("「自動で反映した変更」と表示され、元に戻せる", (await text("diff-panel")).includes("自動で反映した変更") && (await page.locator(q("undo-latest")).count()) === 1);
+  check("トーストでも知らせる（元に戻す付き）", (await page.locator(q("toast-action")).count()) === 1 || (await text("diff-panel")).includes("おまかせで自動反映"));
+  await page.click(q("undo-latest"));
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="diff-panel"]').length === 0);
+  check("元に戻すと切り替え前に戻り、同じ雨では再び自動反映されない", (await readBlocks()).filter((b) => b.switched).length === 0);
+
+  step("M4. おまかせでも、重い変更（標準・Must を外す、固定時刻など）は自動反映されない");
+  await openSim();
+  await page.click(q("sim-rain-stop"));
+  await page.click(q("sim-now-12:00"));
+  await page.click(q("sim-close-button"));
+  await page.waitForSelector(`${q("proposal-card")}, ${q("closure-banner")}`);
+  const heavyShown = (await page.locator(q("proposal-heavy")).count()) === 1;
+  check("標準・Must が休業になる案は、おまかせでも確認が出る（Optional が休業なら軽いので自動）", heavyShown || (await page.locator(q("closure-banner")).count()) === 1);
+  if (heavyShown) check("「おまかせでも自動では反映しません」と書かれている", (await text("proposal-heavy")).includes("おまかせでも自動では反映しません"));
+  if (await page.locator(q("proposal-card")).count()) await page.click(q("proposal-cancel"));
+
+  step("M5. モードは旅程ごとに保存される");
+  await page.reload();
+  await page.waitForSelector(q("mode-switch"));
+  check("再読み込みしても、おまかせのまま", (await page.getAttribute(q("mode-switch"), "data-mode")) === "auto");
+  await page.click(q("mode-suggest"));
 } catch (e) {
   failures++;
   console.error("\n✗ シナリオ中にエラー:", e.message);

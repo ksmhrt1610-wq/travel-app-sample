@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { formatHHMM } from "@/core/time";
 import type { Block, PlanningContext } from "@/core/types";
-import type { RainOverride } from "@/core/weather";
+import { RAIN_STRENGTH, type RainOverride, type RainStrength } from "@/core/weather";
 import { Button, cx } from "./ui";
 
 export const SIM_MIN = 6 * 60;
@@ -28,7 +28,7 @@ interface Props {
 /** デモ用のシミュレーション操作パネル（画面下に固定。折りたたみ可） */
 export function SimulationPanel({ nowMin, onNowChange, rain, onRain, onStopRain, onDelay, closable, ctx, onClose, onReset }: Props) {
   const [open, setOpen] = useState(false);
-  const [prob, setProb] = useState(80);
+  const [strength, setStrength] = useState<RainStrength>("moderate");
   const [rainStart, setRainStart] = useState<number | null>(null); // null = 現在時刻
   const [delay, setDelay] = useState(30);
   const [closeSpot, setCloseSpot] = useState<string>("");
@@ -50,7 +50,11 @@ export function SimulationPanel({ nowMin, onNowChange, rain, onRain, onStopRain,
           <span className="rounded-md bg-white/15 px-2 py-0.5 text-sm font-bold tabular-nums" data-testid="sim-now-label">
             🕐 {formatHHMM(nowMin)}
           </span>
-          {rain && <span className="rounded-md bg-sky-500 px-1.5 py-0.5 text-xs font-bold">☔ {rain.prob}%</span>}
+          {rain && (
+            <span className="rounded-md bg-sky-500 px-1.5 py-0.5 text-xs font-bold">
+              ☔ {rain.strength ? RAIN_STRENGTH[rain.strength].label : `${rain.prob}%`}
+            </span>
+          )}
           <span className="ml-auto text-xs text-slate-300">{open ? "閉じる ▾" : "開く ▴"}</span>
         </button>
 
@@ -100,19 +104,30 @@ export function SimulationPanel({ nowMin, onNowChange, rain, onRain, onStopRain,
             {/* 雨 */}
             <section className="rounded-xl bg-sky-50 p-3">
               <h3 className="mb-1.5 text-xs font-bold text-sky-900">☔ 雨が降り出す</h3>
-              <label className="block text-xs text-slate-700">
-                降水確率：<strong className="tabular-nums" data-testid="sim-rain-prob-label">{prob}%</strong>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={10}
-                  value={prob}
-                  onChange={(e) => setProb(Number(e.target.value))}
-                  className="w-full"
-                  data-testid="sim-rain-prob"
-                />
-              </label>
+              <div className="text-xs text-slate-700">
+                雨の強さ：
+                <strong className="tabular-nums" data-testid="sim-rain-prob-label">
+                  {RAIN_STRENGTH[strength].label}（降水確率{RAIN_STRENGTH[strength].prob}%・{RAIN_STRENGTH[strength].mmPerHour}mm/h）
+                </strong>
+                <div className="mt-1 grid grid-cols-3 gap-1.5" role="radiogroup" aria-label="雨の強さ">
+                  {(Object.keys(RAIN_STRENGTH) as RainStrength[]).map((k) => (
+                    <button
+                      key={k}
+                      type="button"
+                      role="radio"
+                      aria-checked={strength === k}
+                      onClick={() => setStrength(k)}
+                      data-testid={`sim-rain-strength-${k}`}
+                      className={cx(
+                        "min-h-9 rounded-lg border text-xs font-bold",
+                        strength === k ? "border-sky-600 bg-sky-600 text-white" : "border-slate-300 bg-white text-slate-700",
+                      )}
+                    >
+                      {RAIN_STRENGTH[k].label}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <label className="block text-xs text-slate-700">
                 降り出す時刻：<strong className="tabular-nums">{formatHHMM(startMin)}</strong>
                 {rainStart === null && <span className="text-slate-500">（現在時刻）</span>}
@@ -131,7 +146,7 @@ export function SimulationPanel({ nowMin, onNowChange, rain, onRain, onStopRain,
                 <Button
                   variant="primary"
                   onClick={() => {
-                    onRain({ prob, startMin });
+                    onRain({ startMin, prob: RAIN_STRENGTH[strength].prob, mmPerHour: RAIN_STRENGTH[strength].mmPerHour, strength });
                     setOpen(false); // 結果の通知が見えるようにパネルを閉じる
                   }}
                   data-testid="sim-rain-button"

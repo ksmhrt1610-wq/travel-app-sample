@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { adapters } from "@/adapters";
 import { BlockDetailSheet } from "@/components/BlockDetailSheet";
-import { ClosureBanner, DepartureBanner, RainBanner, WalkBanner } from "@/components/Banners";
+import { AttentionBadges, ClosureBanner, DepartureBanner, RainBanner, WalkBanner, type AttentionBadge } from "@/components/Banners";
+import { ModeSwitch } from "@/components/ModeSwitch";
 import { DiffPanel } from "@/components/DiffPanel";
 import { FixedTimesPanel } from "@/components/FixedTimesPanel";
 import { NextActionCard } from "@/components/NextActionCard";
@@ -17,13 +18,15 @@ import { WalkMeter } from "@/components/WalkMeter";
 import { Button, cx, useToast } from "@/components/ui";
 import { suggestReplacement } from "@/core/actions";
 import { absenceByBlock, departureNotices, memberFixedStatuses, nextFixedCountdown } from "@/core/fixed";
-import { describeEvent, isQuietChange, replan, type ReplanEvent, type ReplanResult } from "@/core/replan";
+import { commitResult, itineraryChanged, undoLast } from "@/core/history";
+import { canAutoApply, classifyChange, decideApply, modeOf, type ChangeWeight, type Classification } from "@/core/policy";
+import { describeEvent, replan, type ReplanEvent, type ReplanResult } from "@/core/replan";
 import type { Suggestion } from "@/core/suggest";
 import { formatDateJa, formatHHMM } from "@/core/time";
 import { getNextAction } from "@/core/today";
-import type { Itinerary } from "@/core/types";
+import type { Itinerary, ResponseMode } from "@/core/types";
 import { dayWalking, suggestRestForWalking } from "@/core/walking";
-import { detectRainImpact, type HourlyWeather, type RainOverride } from "@/core/weather";
+import { detectRainImpact, RAIN_RULES, RAIN_STRENGTH, rainMm, type HourlyWeather, type RainOverride } from "@/core/weather";
 import { useTrip, type TodayState } from "@/store/tripStore";
 import { usePlanningContext } from "@/store/usePlanningContext";
 
@@ -43,6 +46,38 @@ interface Proposal {
   title: string;
   result: ReplanResult;
   removeMustIds: string[];
+  classification: Classification;
+}
+
+/**
+ * おまかせモード: アプリが気づいた出来事のうち、軽い変更を自動で反映する（タップなし）。
+ * 同じ出来事（キー）には1回しか反応しない。重い変更は自動では反映せず、通知バナーで確認を求める。
+ */
+function AutoResponder({ enabled, rainKey, rainTarget, walkKey, onRain, onWalk }: {
+  enabled: boolean;
+  rainKey: string | null;
+  rainTarget: number;
+  walkKey: string | null;
+  onRain: () => void;
+  onWalk: () => void;
+}) {
+  const handled = useRef(new Set<string>());
+  useEffect(() => {
+    if (!enabled || !rainKey || rainTarget === 0) return;
+    const key = `rain:${rainKey}:${rainTarget}`;
+    if (handled.current.has(key)) return;
+    handled.current.add(key);
+    onRain();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, rainKey, rainTarget]);
+  useEffect(() => {
+    if (!enabled || !walkKey) return;
+    if (handled.current.has(walkKey)) return;
+    handled.current.add(walkKey);
+    onWalk();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, walkKey]);
+  return null;
 }
 
 export default function TodayPage() {
@@ -114,38 +149,81 @@ export default function TodayPage() {
 
   /* ---------- 再計画エンジンの提案と確定 ---------- */
 
-  /** イベントを再計画エンジンに渡し、組み直し案を作る（確定するまで旅程は変わらない） */
+  const mode: ResponseMode = modeOf(itin);
+
+  /**
+   * イベントを再計画エンジンに渡す。変更の重さとモードで、そのまま反映するか、差分を見せて確定を求めるかが決まる。
+   *   重い変更: 必ず差分→確定 / 軽い変更: 手動なら差分→確定、提案・おまかせならそのまま反映（元に戻すトースト付き）
+   */
   const propose = (event: ReplanEvent, removeMustIds: string[] = []) => {
     const result = replan(today.itinerary, event, ctx, { dayIndex: today.dayIndex, nowMin: today.nowMin, removeMustIds });
     const title = describeEvent(event, ctx, today.itinerary);
-    if (isQuietChange(result)) {
-      commit(result, title); // 余裕時間の変更・固定時刻を外すだけ: 確認なしで反映
+    const classification = classifyChange(result, ctx);
+    if (decideApply(mode, classification.weight) === "apply") {
+      commit(result, title, { weight: classification.weight });
       return;
     }
-    setProposal({ event, title, result, removeMustIds });
+    setProposal({ event, title, result, removeMustIds, classification });
   };
 
-  const commit = (result: ReplanResult, title: string) => {
-    update((t) => {
-      if (!t.today) return t;
-      const history = result.diff.length
-        ? [{ id: `${Date.now()}-${t.today.history.length}`, atMin: t.today.nowMin, title, items: result.diff }, ...t.today.history].slice(0, 20)
-        : t.today.history;
-      return { ...t, today: { ...t.today, itinerary: result.after, history } };
-    });
-    toast.show(result.diff.length ? "確定して、旅程に反映しました" : "旅程への影響はありませんでした");
+  const undo = () => {
+    update((t) => (t.today ? { ...t, today: undoLast(t.today) } : t));
+    setProposal(null);
+    toast.show("元に戻しました");
+  };
+
+  const commit = (result: ReplanResult, title: string, meta: { weight?: ChangeWeight; auto?: boolean } = {}) => {
+    update((t) => (t.today ? { ...t, today: commitResult(t.today, result, { atMin: t.today.nowMin, title, weight: meta.weight, auto: meta.auto }) } : t));
+    const changed = itineraryChanged(result.before, result.after);
+    const message = !changed
+      ? "旅程への影響はありませんでした"
+      : meta.auto
+        ? `🤖 自動で反映しました：${title}`
+        : meta.weight === "light"
+          ? `反映しました：${title}`
+          : "確定して、旅程に反映しました";
+    toast.show(message, changed ? { action: { label: "元に戻す", onClick: undo } } : undefined);
     setProposal(null);
   };
 
-  const confirm = () => proposal && commit(proposal.result, proposal.title);
+  const confirm = () => proposal && commit(proposal.result, proposal.title, { weight: proposal.classification.weight });
+
+  const setMode = (m: ResponseMode) => {
+    setProposal(null);
+    const withMode = (i: Itinerary): Itinerary => ({ ...i, settings: { ...i.settings, mode: m } });
+    update((t) => ({
+      ...t,
+      itinerary: t.itinerary ? withMode(t.itinerary) : t.itinerary,
+      today: t.today ? { ...t.today, itinerary: withMode(t.today.itinerary) } : t.today,
+    }));
+  };
+
+  /** おまかせ: 雨で影響のある屋外の予定を、軽い変更なら自動で Plan B に切り替える */
+  const autoRain = () => {
+    if (!impact.switchable.length) return;
+    const event: ReplanEvent = { type: "plan-b", blockIds: impact.switchable.map((b) => b.id), cause: "rain" };
+    const result = replan(today.itinerary, event, ctx, { dayIndex: today.dayIndex, nowMin: today.nowMin });
+    const classification = classifyChange(result, ctx);
+    if (canAutoApply(mode, classification.weight)) commit(result, `雨のため、屋外の予定${impact.switchable.length}件を Plan B に切り替え`, { weight: "light", auto: true });
+  };
+
+  /** おまかせ: 歩行距離が目安を超えそうなときの休憩を、軽い変更なら自動で入れる */
+  const autoWalk = () => {
+    if (!walkSuggest) return;
+    dismiss(`walk:${walkSuggest.beforeBlockId}`);
+    const event: ReplanEvent = { type: "tired", level: "light", source: "walk-limit" };
+    const result = replan(today.itinerary, event, ctx, { dayIndex: today.dayIndex, nowMin: today.nowMin });
+    const classification = classifyChange(result, ctx);
+    if (canAutoApply(mode, classification.weight)) commit(result, describeEvent(event, ctx, today.itinerary), { weight: "light", auto: true });
+  };
 
   /** 空きができたときの提案を選ぶ: いまの案を確定してから、その提案を新しい組み直し案にする */
   const applySuggestion = (s: Suggestion) => {
     if (!proposal) return;
     const base = proposal.result.after;
-    commit(proposal.result, proposal.title);
+    commit(proposal.result, proposal.title, { weight: proposal.classification.weight });
     const result = replan(base, s.event, ctx, { dayIndex: today.dayIndex, nowMin: today.nowMin });
-    setProposal({ event: s.event, title: describeEvent(s.event, ctx, base), result, removeMustIds: [] });
+    setProposal({ event: s.event, title: describeEvent(s.event, ctx, base), result, removeMustIds: [], classification: classifyChange(result, ctx) });
   };
 
   const setNow = (min: number) => {
@@ -176,6 +254,49 @@ export default function TodayPage() {
   const walkSuggest = suggestRestForWalking(day, ctx, itin.prefs.pace, nowMin);
   const showWalk = walkSuggest && !dismissed.includes(`walk:${walkSuggest.beforeBlockId}`);
   const walkNext = walkSuggest ? day.blocks.find((b) => b.id === walkSuggest.beforeBlockId) : undefined;
+
+  /** 手動モードでバナーの代わりに出すバッジ（タップすると、その対応の案を作る） */
+  const badges: AttentionBadge[] = [
+    ...(showRainBanner
+      ? [
+          {
+            id: "rain",
+            tone: "rain" as const,
+            text: `☔ 雨の予報があります（屋外 ${rainAffected}件に影響）`,
+            onClick: () => impact.switchable.length && propose({ type: "plan-b", blockIds: impact.switchable.map((b) => b.id), cause: "rain" }),
+          },
+        ]
+      : []),
+    ...closedBlocks.map((b) => ({
+      id: `closure:${b.id}`,
+      tone: "closure" as const,
+      text: `⛔ 「${spotName(b.spotId)}」が臨時休業`,
+      onClick: () => {
+        const s = suggestions.get(b.id);
+        if (s) propose({ type: "closure", spotId: b.spotId!, replacementSpotId: s.spot.id });
+        else propose({ type: "skip", blockIds: [b.id] });
+      },
+    })),
+    ...(showWalk && walkSuggest && walkNext
+      ? [
+          {
+            id: "walk",
+            tone: "walk" as const,
+            text: "🚶 歩行距離が目安を超えそうです（休憩の案を見る）",
+            onClick: () => {
+              dismiss(`walk:${walkSuggest.beforeBlockId}`);
+              propose({ type: "tired", level: "light", source: "walk-limit" });
+            },
+          },
+        ]
+      : []),
+    ...notices.map((n) => ({
+      id: n.id,
+      tone: "departure" as const,
+      text: `⏰ ${n.level === "over" ? "出発すべき時刻を過ぎています" : n.level === "before10" ? "出発の10分前" : "出発の30分前"}（${formatHHMM(n.departBy)}までに ${n.title}）`,
+      onClick: () => dismiss(n.id),
+    })),
+  ];
 
   const latest = today.history[0];
   const changes = new Map((latest?.items ?? []).filter((i) => i.dayIndex === dayIndex).map((i) => [i.blockId, i]));
@@ -215,6 +336,17 @@ export default function TodayPage() {
         </div>
       )}
 
+      <ModeSwitch mode={mode} onChange={setMode} />
+      <AutoResponder
+        enabled={mode === "auto"}
+        rainKey={showRainBanner ? rainKey : null}
+        rainTarget={impact.switchable.length}
+        walkKey={showWalk && walkSuggest ? `walk:${walkSuggest.beforeBlockId}` : null}
+        onRain={autoRain}
+        onWalk={autoWalk}
+      />
+
+      <div className="mt-3" />
       <NextActionCard action={action} nowMin={nowMin} fixed={fixedCountdown} memberDepartures={memberDepartures} />
 
       <Button variant="secondary" size="lg" className="mt-3 w-full border-amber-300 bg-amber-50 text-amber-950 hover:bg-amber-100" onClick={() => setTiredOpen(true)} data-testid="tired-button">
@@ -231,35 +363,39 @@ export default function TodayPage() {
             onCancel={() => setProposal(null)}
             onRemoveMust={(blockId) => propose(proposal.event, [...proposal.removeMustIds, blockId])}
             onApplySuggestion={applySuggestion}
+            classification={proposal.classification}
+            mode={mode}
           />
         )}
 
-        {notices.map((n) => (
-          <DepartureBanner key={n.id} notice={n} onDismiss={() => dismiss(n.id)} />
-        ))}
+        {mode === "manual" && <AttentionBadges items={badges} />}
 
-        {showRainBanner && today.rain && (
+        {mode !== "manual" &&
+          notices.map((n) => (
+            <DepartureBanner key={n.id} notice={n} onDismiss={() => dismiss(n.id)} />
+          ))}
+
+        {mode !== "manual" && showRainBanner && today.rain && (
           <RainBanner
             impact={impact}
             rain={today.rain}
             ctx={ctx}
-            onSwitchOne={() => impact.switchable[0] && propose({ type: "plan-b", blockIds: [impact.switchable[0].id] })}
-            onSwitchAll={() => propose({ type: "plan-b", blockIds: impact.switchable.map((b) => b.id) })}
+            onSwitchOne={() => impact.switchable[0] && propose({ type: "plan-b", blockIds: [impact.switchable[0].id], cause: "rain" })}
+            onSwitchAll={() => propose({ type: "plan-b", blockIds: impact.switchable.map((b) => b.id), cause: "rain" })}
             onDismiss={() => update((t) => (t.today ? { ...t, today: { ...t.today, rainDismissed: rainKey ?? undefined } } : t))}
           />
         )}
-        {today.rain && tolerance === "dont-care" && (
+        {today.rain && rainAffected === 0 && (
           <p className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs leading-relaxed text-sky-900" data-testid="rain-info">
-            ☔ 雨の予報が出ていますが、雨への許容度が「気にしない」のため自動の切り替え提案はしていません。予定をタップすると Plan B に手動で切り替えられます。
+            ☔ {today.rain.strength ? RAIN_STRENGTH[today.rain.strength].label : "雨"}（降水確率 {today.rain.prob}%・{rainMm(today.rain)}mm/h、{formatHHMM(today.rain.startMin)}〜）。
+            {tolerance === "dont-care"
+              ? `雨への許容度が「気にしない」のため、強い雨（${RAIN_RULES["dont-care"].mmPerHour}mm/h以上）でなければ切り替えは提案しません。予定をタップすると Plan B に手動で切り替えられます。`
+              : tolerance === "light-rain-ok"
+                ? `「小雨ならOK」の基準（${RAIN_RULES["light-rain-ok"].mmPerHour}mm/h以上）に達していない、または切り替えが必要な屋外の予定がありません。`
+                : "切り替えが必要な屋外の予定はありません。"}
           </p>
         )}
-        {today.rain && tolerance !== "dont-care" && rainAffected === 0 && (
-          <p className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs leading-relaxed text-sky-900" data-testid="rain-info">
-            ☔ 降水確率 {today.rain.prob}%（{formatHHMM(today.rain.startMin)}〜）。{tolerance === "light-rain-ok" && today.rain.prob < 60 ? "「小雨ならOK」の基準（60%）に達していないため、" : ""}
-            切り替えが必要な屋外の予定はありません。
-          </p>
-        )}
-        {closedBlocks.map((b) => (
+        {mode !== "manual" && closedBlocks.map((b) => (
           <ClosureBanner
             key={b.id}
             block={b}
@@ -272,7 +408,7 @@ export default function TodayPage() {
             onSkip={() => propose({ type: "skip", blockIds: [b.id] })}
           />
         ))}
-        {showWalk && walkSuggest && walkNext && (
+        {mode !== "manual" && showWalk && walkSuggest && walkNext && (
           <WalkBanner
             suggestion={walkSuggest}
             nextName={walkNext.fixed ? walkNext.fixed.title : spotName(walkNext.spotId)}
@@ -286,7 +422,7 @@ export default function TodayPage() {
 
         <WalkMeter walking={walking} pace={itin.prefs.pace} />
         <FixedTimesPanel itinerary={itin} ctx={ctx} dayIndex={dayIndex} onPropose={(e) => propose(e)} />
-        <DiffPanel history={today.history} ctx={ctx} itin={itin} />
+        <DiffPanel history={today.history} ctx={ctx} itin={itin} onUndo={undo} />
       </div>
 
       <h2 className="mb-2 mt-5 text-sm font-bold text-slate-700">今日のタイムライン</h2>

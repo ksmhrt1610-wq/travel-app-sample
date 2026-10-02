@@ -24,6 +24,8 @@ export interface TripState {
   prefs?: Preferences;
   itinerary?: Itinerary;
   today?: TodayState;
+  /** 旅程画面で反映した変更の履歴（最大10件。直前の変更から元に戻せる） */
+  history?: ChangeSet[];
 }
 
 // v2: 固定時刻・メンバー・休憩を追加したため、旧形式の保存データは読み込まない

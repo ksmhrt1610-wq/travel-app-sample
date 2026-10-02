@@ -200,9 +200,14 @@ export interface Day {
   lowWalking?: boolean;
 }
 
+/** 当日の対応のしかた。手動: 変更はすべて差分→確定 / 提案: 軽い変更はワンタップ・重い変更は差分→確定 / おまかせ: 軽い変更は自動で反映 */
+export type ResponseMode = "manual" | "suggest" | "auto";
+
 export interface ItinerarySettings {
   /** 固定時刻の余裕時間（分）。出発すべき時刻 = 固定時刻 − 移動時間 − 余裕時間 */
   marginMin: number;
+  /** 当日の対応のしかた（旅程ごとに保存）。省略時は「提案」 */
+  mode?: ResponseMode;
 }
 
 export interface Itinerary {

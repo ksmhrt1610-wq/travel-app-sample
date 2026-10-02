@@ -1,7 +1,7 @@
 import { findOpenSlot, overlapsCrowded } from "./availability";
 import { haversineM } from "./geo";
 import { CATEGORY_LABEL, travelLabel } from "./labels";
-import { BUDGET_COMFORT, categoryAffinity } from "./scoring";
+import { BUDGET_COMFORT, categoryAffinity, SCORE_WEIGHTS } from "./scoring";
 import type { Block, Itinerary, PlanB, PlanningContext, Preferences, Spot } from "./types";
 
 export const PLAN_B_MAX_DISTANCE_M = 2000;
@@ -90,7 +90,7 @@ export function findPlanBCandidates(
     score -= 0.3 * (Math.abs(duration - originalDuration) / 30);
     if (overlapsCrowded(c, window.start, window.start + duration)) score -= 0.5;
     if (prefs) {
-      score -= 0.7 * Math.max(0, c.priceLevel - BUDGET_COMFORT[prefs.budget]);
+      score -= SCORE_WEIGHTS.overBudgetPerLevel * Math.max(0, c.priceLevel - BUDGET_COMFORT[prefs.budget]);
     }
     if (!requireIndoor && c.setting === "indoor") score += 0.5;
 

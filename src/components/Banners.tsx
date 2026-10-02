@@ -4,7 +4,7 @@ import type { DepartureNotice } from "@/core/fixed";
 import { formatHHMM } from "@/core/time";
 import type { RestSuggestion } from "@/core/walking";
 import type { Block, PlanningContext } from "@/core/types";
-import type { RainImpact, RainOverride } from "@/core/weather";
+import { RAIN_STRENGTH, rainMm, type RainImpact, type RainOverride } from "@/core/weather";
 import type { PlanBCandidate } from "@/core/planb";
 import { Button } from "./ui";
 
@@ -29,6 +29,40 @@ function Item({ block, ctx, showPlanB }: { block: Block; ctx: PlanningContext; s
           ))}
       </span>
     </li>
+  );
+}
+
+/** 手動モードで、バナーの代わりに出す小さなバッジ（タップすると、その対応の案を作る） */
+export interface AttentionBadge {
+  id: string;
+  text: string;
+  tone: "rain" | "closure" | "walk" | "departure";
+  onClick: () => void;
+}
+
+const BADGE_TONE: Record<AttentionBadge["tone"], string> = {
+  rain: "border-sky-300 bg-sky-50 text-sky-900",
+  closure: "border-rose-300 bg-rose-50 text-rose-900",
+  walk: "border-teal-300 bg-teal-50 text-teal-900",
+  departure: "border-amber-400 bg-amber-50 text-amber-950",
+};
+
+export function AttentionBadges({ items }: { items: AttentionBadge[] }) {
+  if (!items.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5" data-testid="attention-badges">
+      {items.map((b) => (
+        <button
+          key={b.id}
+          type="button"
+          onClick={b.onClick}
+          data-testid={`badge-${b.tone}`}
+          className={`min-h-8 rounded-full border px-3 py-1 text-xs font-bold ${BADGE_TONE[b.tone]}`}
+        >
+          {b.text}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -57,7 +91,7 @@ export function RainBanner({
       data-testid="rain-banner"
     >
       <h2 className="text-[15px] font-extrabold text-sky-950">
-        ☔ {formatHHMM(rain.startMin)}から雨（降水確率 {rain.prob}%）— Plan Bに切り替えますか？
+        ☔ {formatHHMM(rain.startMin)}から{rain.strength ? RAIN_STRENGTH[rain.strength].label : "雨"}（降水確率 {rain.prob}%・{rainMm(rain)}mm/h）— Plan Bに切り替えますか？
       </h2>
       <p className="mt-0.5 text-xs text-sky-900">屋外の予定 {total}件に影響します。</p>
 
