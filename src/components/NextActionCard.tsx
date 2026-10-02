@@ -5,7 +5,7 @@ import { mapsDirectionsUrl, mapsSearchUrl } from "@/core/maps";
 import { travelLabel } from "@/core/labels";
 import { formatDuration, formatHHMM } from "@/core/time";
 import type { NextAction } from "@/core/today";
-import { Chip, cx } from "./ui";
+import { Button, Chip, cx } from "./ui";
 
 export interface MemberDeparture {
   who: string;
@@ -51,13 +51,18 @@ export function NextActionCard({
   nowMin,
   fixed = null,
   memberDepartures = [],
+  onArrived,
+  onDeparted,
 }: {
   action: NextAction;
   nowMin: number;
   fixed?: FixedCountdown | null;
   memberDepartures?: MemberDeparture[];
+  /** 「着いた」「出発した」を押した（その時刻が実績になる） */
+  onArrived?: () => void;
+  onDeparted?: () => void;
 }) {
-  const { state, current, currentSpot, next, nextSpot } = action;
+  const { state, current, currentSpot, next, nextSpot, nextName } = action;
 
   if (state === "finished" || state === "empty") {
     return (
@@ -73,6 +78,12 @@ export function NextActionCard({
   }
 
   const moving = action.minutesUntilArrival !== undefined;
+  const currentName = currentSpot?.name ?? current?.free?.name ?? (current?.label === "rest" ? "休憩" : "余白（休憩・自由時間）");
+  // 着いた・出発した: 予定の最中なら「出発した」、次の予定へ向かっているなら「着いた」
+  const departing = action.departable;
+  const arriving = action.arrivable;
+  const canDepart = !!departing && !!onDeparted;
+  const canArrive = !!arriving && !!onArrived;
   const departNow = !current && (action.minutesUntilDeparture ?? 1) === 0 && !moving;
 
   return (
@@ -84,16 +95,17 @@ export function NextActionCard({
 
       {current && (
         <p className="mt-2 rounded-xl bg-white/10 px-3 py-1.5 text-[13px] text-slate-100" data-testid="next-current">
-          いま：<strong>{currentSpot ? currentSpot.name : "余白（休憩・自由時間）"}</strong>
+          いま：<strong>{currentName}</strong>
           <span className="text-slate-300">（{formatHHMM(current.endMin)} まで・あと{formatDuration(current.endMin - nowMin)}）</span>
         </p>
       )}
 
-      {next && nextSpot ? (
+      {next && nextName ? (
         <>
           <p className="mt-3 text-lg font-extrabold leading-snug" data-testid="next-destination">
             {moving ? "移動中 → " : "→ "}
-            {nextSpot.name}
+            {nextName}
+            {next.detour && <span className="ml-2 align-middle text-xs font-bold text-amber-300">寄り道</span>}
           </p>
           <div className="mt-2 flex flex-wrap items-end gap-x-4 gap-y-1">
             <div>
@@ -116,27 +128,48 @@ export function NextActionCard({
               {next.travelMin > 0 && <p className="text-slate-300">{travelLabel(next.travelMode, next.travelMin)}</p>}
             </div>
           </div>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <a
-              href={mapsDirectionsUrl(nextSpot, next.travelMode === "none" ? "transit" : next.travelMode, currentSpot)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex min-h-10 items-center justify-center rounded-xl bg-white text-sm font-bold text-slate-900 hover:bg-slate-100"
-            >
-              🧭 経路を開く
-            </a>
-            <a
-              href={mapsSearchUrl(nextSpot)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex min-h-10 items-center justify-center rounded-xl bg-white/15 text-sm font-bold text-white hover:bg-white/25"
-            >
-              📍 Google Maps
-            </a>
-          </div>
+          {nextSpot ? (
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <a
+                href={mapsDirectionsUrl(nextSpot, next.travelMode === "none" ? "transit" : next.travelMode, currentSpot)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex min-h-10 items-center justify-center rounded-xl bg-white text-sm font-bold text-slate-900 hover:bg-slate-100"
+              >
+                🧭 経路を開く
+              </a>
+              <a
+                href={mapsSearchUrl(nextSpot)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex min-h-10 items-center justify-center rounded-xl bg-white/15 text-sm font-bold text-white hover:bg-white/25"
+              >
+                📍 Google Maps
+              </a>
+            </div>
+          ) : (
+            <p className="mt-2 text-[11px] text-slate-300" data-testid="free-assumption">
+              ※ 場所が決まっていない寄り道なので、移動は約{next.travelMin}分と仮定しています。
+            </p>
+          )}
         </>
       ) : (
         <p className="mt-3 text-lg font-extrabold">これが今日の最後の予定です</p>
+      )}
+      {(canDepart || canArrive) && (
+        <div className="mt-3 grid gap-2" data-testid="progress-buttons">
+          {canDepart && (
+            <Button variant="amber" onClick={onDeparted} data-testid="progress-departed" className="w-full">
+              🚪 {action.departableName ? `「${action.departableName}」を` : ""}出発した（{formatHHMM(nowMin)}）
+            </Button>
+          )}
+          {canArrive && (
+            <Button variant="emerald" onClick={onArrived} data-testid="progress-arrived" className="w-full">
+              📍 {action.arrivableName ? `「${action.arrivableName}」に` : ""}着いた（{formatHHMM(nowMin)}）
+            </Button>
+          )}
+          <p className="text-[11px] text-slate-300">押した時刻が実績になり、遅れや早まりが後ろの予定に反映されます。</p>
+        </div>
       )}
       <FixedCountdownBlock fixed={fixed} members={memberDepartures} nowMin={nowMin} />
     </section>

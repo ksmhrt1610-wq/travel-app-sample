@@ -1,5 +1,5 @@
 import { findOpenSlot, isOpenOnDate, overlapsCrowded } from "./availability";
-import { withWalkLimit } from "./geo";
+import { WALK_M_PER_MIN, withWalkLimit } from "./geo";
 import { MEAL_ADJUST_WINDOW } from "./meals";
 import { parseHHMM } from "./time";
 import type { Block, BlockIssue, Day, LatLng, PlanningContext, Spot, TravelEstimate, TravelEstimator } from "./types";
@@ -35,6 +35,17 @@ export function isInert(b: Block): boolean {
   return b.skip === "skipped" || !!b.closed;
 }
 
+/** 座標のない自由入力の寄り道で、直前の場所から移動にかかると仮定する時間（分）の初期値 */
+export const FREE_STOP_TRAVEL_MIN = 10;
+
+/**
+ * 開始済みか。実績（着いた・出発した）があれば実績を優先し、なければ時刻（開始時刻 <= 現在時刻）で判定する。
+ */
+export function isStarted(b: Block, now: number | undefined): boolean {
+  if (b.actualStartMin !== undefined || b.actualEndMin !== undefined) return true;
+  return now !== undefined && b.startMin <= now;
+}
+
 /** ブロックの場所（スポット、または駅・宿など）。余白など場所のないブロックは undefined */
 export function placeOf(b: Block, ctx: PlanningContext): LatLng | undefined {
   return b.spotId ? ctx.spotById.get(b.spotId) : b.place;
@@ -63,7 +74,7 @@ function hoursLateBy(spot: Spot, date: string, start: number, duration: number):
 /**
  * 1日分のブロックの時刻を再計算する（純粋関数。入力は変更しない）。
  *
- * - 開始済み（startMin <= nowMin）のブロックは固定。
+ * - 開始済みのブロックは固定（実績の着いた・出発した時刻があれば、その時刻。なければ startMin <= nowMin）。
  * - 各ブロックの開始 = max(前の場所からの到着, 計画上の開始, notBefore)。営業開始まで待てる場合は待つ。
  * - 固定時刻ブロックの開始は固定時刻そのもの。手前のブロックは、固定時刻から逆算した最遅の開始時刻
  *   （固定時刻 − 余裕 − 移動時間 − 滞在）を超えないよう、計画上の開始より前倒しで動く。
@@ -82,7 +93,17 @@ export function recomputeDay(day: Day, ctx: PlanningContext, opts: RecomputeOpti
   const travelFn = dayTravel(day, ctx);
   const src = day.blocks;
   const n = src.length;
-  const started = (b: Block) => now !== undefined && b.startMin <= now;
+  // 実績（着いた・出発した）を記録した予定より後ろの予定は、「着いた」の記録があるまで開始していない
+  // （出発が遅れたとき、次の予定の計画上の開始時刻が過ぎていても、まだ着いていないため）
+  let lastActual = -1;
+  src.forEach((b, i) => {
+    if (!isInert(b) && (b.actualStartMin !== undefined || b.actualEndMin !== undefined)) lastActual = i;
+  });
+  const started = (b: Block, i: number) => {
+    if (b.actualStartMin !== undefined || b.actualEndMin !== undefined) return true;
+    if (lastActual >= 0 && i > lastActual) return false;
+    return isStarted(b, now);
+  };
 
   // 1. 順序だけで決まる移動（前の場所 → この場所）
   const travelIn: (TravelEstimate | undefined)[] = new Array(n).fill(undefined);
@@ -90,6 +111,11 @@ export function recomputeDay(day: Day, ctx: PlanningContext, opts: RecomputeOpti
   for (let i = 0; i < n; i++) {
     const b = src[i];
     if (isInert(b)) continue;
+    if (b.free) {
+      // 座標のない寄り道: 移動は仮定の時間。場所は動かさない（次の移動は、その前の場所から数える）
+      travelIn[i] = { minutes: b.free.travelMin, mode: "walk", distanceM: Math.round(b.free.travelMin * WALK_M_PER_MIN) };
+      continue;
+    }
     const p = placeOf(b, ctx);
     if (!p) continue;
     travelIn[i] = travelFn(loc, p);
@@ -132,9 +158,18 @@ export function recomputeDay(day: Day, ctx: PlanningContext, opts: RecomputeOpti
       continue;
     }
 
-    if (started(b)) {
-      out.push(b);
-      cursor = Math.max(cursor, b.endMin);
+    if (started(b, i)) {
+      let blk = b;
+      if (b.actualEndMin !== undefined) {
+        // 出発した: 実績の時刻で終わっている
+        const s = b.actualStartMin ?? b.startMin;
+        blk = { ...b, startMin: s, endMin: Math.max(s, b.actualEndMin) };
+      } else if (b.actualStartMin !== undefined) {
+        // 着いた: 実績の時刻から、予定の滞在時間ぶん（まだ出発していなければ、いまの時刻まではここにいる）
+        blk = { ...b, startMin: b.actualStartMin, endMin: Math.max(b.actualStartMin + b.durationMin, now ?? 0) };
+      }
+      out.push(blk);
+      cursor = Math.max(cursor, blk.endMin);
       if (b.fixed?.endsDay) afterEnd = true;
       continue;
     }
@@ -178,16 +213,17 @@ export function recomputeDay(day: Day, ctx: PlanningContext, opts: RecomputeOpti
       continue;
     }
 
-    // 場所のない時間ブロック（余白・場所を決めない休憩）
+    // 場所のない時間ブロック（余白・場所を決めない休憩・自由入力の寄り道）
     if (!placeOf(b, ctx)) {
-      let start = Math.max(cursor, notBefore);
+      const freeTravel = b.free?.travelMin ?? 0;
+      let start = Math.max(cursor + freeTravel, notBefore);
       if (pending > 0) {
         start += pending;
         notBefore = start;
         pending = 0;
       }
       let end: number;
-      if (b.label === "rest" || mode === "compact") {
+      if (b.label !== "buffer" || mode === "compact") {
         end = start + b.durationMin;
       } else {
         // 余白: 前の終了時刻から始まり、遅れた分だけ縮んで計画上の終了時刻に合わせる。固定時刻が近いときはさらに縮む
@@ -200,9 +236,9 @@ export function recomputeDay(day: Day, ctx: PlanningContext, opts: RecomputeOpti
         ...withTravel,
         startMin: start,
         endMin: end,
-        travelMin: 0,
-        travelMode: "none",
-        travelDistanceM: undefined,
+        travelMin: freeTravel,
+        travelMode: b.free ? "walk" : "none",
+        travelDistanceM: b.free ? Math.round(freeTravel * WALK_M_PER_MIN) : undefined,
         notBefore: notBefore > 0 ? notBefore : undefined,
         issues: undefined,
         lateByMin: undefined,

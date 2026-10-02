@@ -7,6 +7,7 @@ export const mockWeatherProvider: WeatherProvider = {
       hour,
       precipProb: hour >= 12 && hour <= 17 ? 20 : 10,
       mmPerHour: 0,
+      wbgt: hour >= 11 && hour <= 16 ? 25 : 21,
     }));
   },
 };

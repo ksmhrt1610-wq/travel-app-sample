@@ -12,7 +12,9 @@ import {
   DAY_END_TOLERANCE_MIN,
   DEFAULT_MARGIN_MIN,
   dayTravel,
+  FREE_STOP_TRAVEL_MIN,
   isInert,
+  isStarted,
   placeOf,
   recomputeDay,
   type RecomputeOptions,
@@ -55,14 +57,24 @@ export type ReplanEvent =
   /** スポットを1件足す（空きができたときの提案など）。afterBlockId が null なら、これから行く予定の先頭に入れる */
   | { type: "add-spot"; spotId: string; afterBlockId: string | null; label?: "optional" | "normal"; cause?: "detour" }
   /** 休憩を1件足す（駅の近くで待つなど）。spotId を省くと場所を決めない休憩 */
-  | { type: "add-rest"; afterBlockId: string | null; minutes: number; spotId?: string };
+  | { type: "add-rest"; afterBlockId: string | null; minutes: number; spotId?: string }
+  /** 実績: 着いた／出発した（時刻は atMin）。遅れや早まりを後ろの予定に反映する */
+  | { type: "progress"; blockId: string; kind: "arrived" | "departed"; atMin: number }
+  /** 寄り道。スポット、または名前と滞在時間の自由入力（座標がないので移動は10分と仮定）。afterBlockId を省くと、いまの予定の後ろ */
+  | { type: "detour"; stop: { spotId: string } | { name: string; durationMin: number }; afterBlockId?: string | null }
+  /** 暑さ対策: 屋外の予定の後に休憩（屋内の休める場所があればそこ）を挟む */
+  | { type: "heat-rest"; blockIds: string[]; minutes: number }
+  /** いまの場所での滞在を延長する（早く進んだとき） */
+  | { type: "extend-stay"; blockId: string; minutes: number }
+  /** 余白を足す（早く進んだとき） */
+  | { type: "add-buffer"; afterBlockId: string | null; minutes: number };
 
 export interface ReplanOptions {
   /** 操作の対象の日 */
   dayIndex: number;
   /** 現在時刻（0:00 からの分）。当日モードでのみ指定する。開始済みの予定は動かさない */
   nowMin?: number;
-  /** ユーザーが確認して「削ってよい」とした Must・食事のブロック ID */
+  /** ユーザーが確認して「削ってよい」とした Must・食事・寄り道のブロック ID */
   removeMustIds?: string[];
   /** 変更理由を文章にするもの（省略するとテンプレート） */
   writer?: ExplanationWriter;
@@ -81,6 +93,10 @@ export type StepKind =
   | "skip"
   | "restore"
   | "add-spot"
+  | "progress"
+  | "detour"
+  | "extend-stay"
+  | "add-buffer"
   | "drop-must"
   | "drop-optional"
   | "shorten"
@@ -111,8 +127,8 @@ export interface MustCandidate {
   blockId: string;
   spotId?: string;
   name: string;
-  /** must: 絶対に行きたい場所 / meal: 食事（どちらも自動では削らない） */
-  kind: "must" | "meal";
+  /** must: 絶対に行きたい場所 / meal: 食事 / detour: 当日に入れた寄り道（いずれも自動では削らない） */
+  kind: "must" | "meal" | "detour";
   /** これを外せば、すべての違反が解消する */
   fixesAll: boolean;
 }
@@ -162,6 +178,8 @@ const BAD_WEIGHT = 10000;
 const MEAL_REPLACE_RADIUS_M = 1000;
 /** 休憩の位置を選ぶときの、失う予定の重み（重いほど守りたい） */
 export const LOSS_WEIGHT = { optional: 1, normal: 3, meal: 10, must: 100 } as const;
+/** 予定より何分以上遅れたら「遅れ」として扱うか（実績の記録） */
+export const PROGRESS_LATE_MIN = 10;
 /** 休憩を入れる位置の候補数: 次の予定の手前／次の予定の後／次の次の予定の後 */
 const REST_POSITIONS = 3;
 
@@ -172,11 +190,12 @@ export function minStayOf(spot: Spot): number {
 
 /* ---------- 補助 ---------- */
 
-const startedAt = (b: Block, now: number | undefined) => now !== undefined && b.startMin <= now;
+const startedAt = (b: Block, now: number | undefined) => isStarted(b, now);
 const movable = (b: Block, now: number | undefined) => !isInert(b) && !startedAt(b, now);
 
 function blockName(b: Block, ctx: PlanningContext): string {
   if (b.fixed) return b.fixed.title;
+  if (b.free) return b.free.name;
   if (b.spotId) return ctx.spotById.get(b.spotId)?.name ?? "予定";
   return b.label === "rest" ? "休憩" : b.label === "buffer" ? "余白" : "予定";
 }
@@ -283,6 +302,30 @@ function makeRestBlock(id: string, minutes: number, startMin: number, spotId?: s
     : { id, label: "rest", durationMin: minutes, startMin, endMin: startMin + minutes, travelMin: 0, travelMode: "none" };
 }
 
+/** from の近く（radiusM 以内）の、屋内の休める場所で、休憩の時間に営業しているもの。いちばん近い（次の場所に近い）もの */
+function pickRestSpot(
+  ctx: PlanningContext,
+  day: Day,
+  from: LatLng,
+  next: LatLng | undefined,
+  t0: number,
+  minutes: number,
+  radiusM: number,
+  exclude: ReadonlySet<string>,
+): Spot | undefined {
+  const travel = dayTravel(day, ctx);
+  let best: { spot: Spot; score: number } | null = null;
+  for (const sp of ctx.spots) {
+    if (exclude.has(sp.id) || !sp.restable || sp.setting !== "indoor") continue;
+    const d = haversineM(from, sp);
+    if (d > radiusM) continue;
+    if (!findOpenSlot(sp, day.date, t0 + travel(from, sp).minutes, minutes)) continue;
+    const score = d + (next ? 0.5 * haversineM(sp, next) : 0);
+    if (!best || score < best.score) best = { spot: sp, score };
+  }
+  return best?.spot;
+}
+
 /**
  * 休憩を入れる位置と場所の候補。
  * 位置: 次の予定の手前／次の予定の後／次の次の予定の後（最終便のあとには入れない）。
@@ -334,21 +377,12 @@ function restPlacements(itin: Itinerary, day: Day, ctx: PlanningContext, now: nu
       if (i >= pos && !isInert(b) && b.spotId) later.add(b.spotId);
     });
 
-    let best: { spot: Spot; score: number } | null = null;
-    for (const sp of ctx.spots) {
-      if (later.has(sp.id) || !sp.restable || sp.setting !== "indoor") continue;
-      const d = haversineM(prevPlace, sp);
-      if (d > radiusM) continue;
-      if (!findOpenSlot(sp, day.date, t0 + travel(prevPlace, sp).minutes, minutes)) continue;
-      const score = d + (nextPlace ? 0.5 * haversineM(sp, nextPlace) : 0);
-      if (!best || score < best.score) best = { spot: sp, score };
-    }
-
-    const block = makeRestBlock(id, minutes, t0, best?.spot.id);
+    const found = pickRestSpot(ctx, day, prevPlace, nextPlace, t0, minutes, radiusM, later);
+    const block = makeRestBlock(id, minutes, t0, found?.id);
     const blocks = [...day.blocks];
     blocks.splice(pos, 0, block);
-    const mode: RestMode = !best ? "generic" : best.spot.id === prevSpotId ? "extend" : "nearby";
-    return { day: { ...day, blocks }, blockId: id, spot: best?.spot, mode, order, afterBlockId };
+    const mode: RestMode = !found ? "generic" : found.id === prevSpotId ? "extend" : "nearby";
+    return { day: { ...day, blocks }, blockId: id, spot: found, mode, order, afterBlockId };
   });
 }
 
@@ -569,7 +603,7 @@ function settle(start: Day, env: SettleEnv): Settled {
 
   // 1. Optional を、違反に近い後ろ側から削除
   while (cur > 0) {
-    const pool = day.blocks.filter((b) => b.label === "optional" && !b.meal && movable(b, now)).reverse();
+    const pool = day.blocks.filter((b) => b.label === "optional" && !b.meal && !b.detour && movable(b, now)).reverse();
     let hit: { b: Block; trial: Day; bad: number } | null = null;
     for (const b of pool) {
       const trial = dropIds(day, [b.id]);
@@ -620,7 +654,7 @@ function settle(start: Day, env: SettleEnv): Settled {
 
   // 3. 標準を、後ろから削除（食事は削除しない）
   while (cur > 0) {
-    const pool = day.blocks.filter((b) => b.label === "normal" && !b.meal && movable(b, now)).reverse();
+    const pool = day.blocks.filter((b) => b.label === "normal" && !b.meal && !b.detour && movable(b, now)).reverse();
     let hit: { b: Block; trial: Day; bad: number } | null = null;
     for (const b of pool) {
       const trial = dropIds(day, [b.id]);
@@ -690,10 +724,16 @@ function settle(start: Day, env: SettleEnv): Settled {
   const mustCandidates: MustCandidate[] = [];
   if (cur > 0) {
     for (const b of [...day.blocks].reverse()) {
-      if ((b.label !== "must" && !b.meal) || !movable(b, now)) continue;
+      if ((b.label !== "must" && !b.meal && !b.detour) || !movable(b, now)) continue;
       const bad = badness(dropIds(day, [b.id]), now);
       if (bad < cur) {
-        mustCandidates.push({ blockId: b.id, spotId: b.spotId, name: blockName(b, ctx), kind: b.label === "must" ? "must" : "meal", fixesAll: bad === 0 });
+        mustCandidates.push({
+          blockId: b.id,
+          spotId: b.spotId,
+          name: blockName(b, ctx),
+          kind: b.label === "must" ? "must" : b.meal ? "meal" : "detour",
+          fixesAll: bad === 0,
+        });
       }
     }
   }
@@ -717,7 +757,9 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
     const found = work.days.find((d) => d.blocks.some((b) => b.id === fid) || d.memberFixed?.some((f) => f.id === fid));
     if (found) di = found.index;
   }
-  const now = di === opts.dayIndex ? opts.nowMin : undefined;
+  let now = di === opts.dayIndex ? opts.nowMin : undefined;
+  // 実績（着いた・出発した）の記録は、その時刻が現在時刻
+  if (event.type === "progress" && now === undefined) now = event.atMin;
   let day: Day = work.days[di];
   const walkingBeforeM = dayWalking(itin.days[di], ctx, itin.prefs.pace, now).remainingM;
 
@@ -863,6 +905,123 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
       steps.push({ phase: "event", kind: "insert-rest", blockIds: [id], detail: sp?.name, cause: { kind: "user" } });
       break;
     }
+    case "progress": {
+      const idx = day.blocks.findIndex((b) => b.id === event.blockId);
+      if (idx < 0) break;
+      const blocks = [...day.blocks];
+      const target = blocks[idx];
+      const passed: string[] = [];
+      const touched: string[] = [target.id];
+      let lateBy: number;
+      if (event.kind === "arrived") {
+        lateBy = event.atMin - (target.plannedStartMin ?? target.startMin);
+        // この予定に着いたので、手前の予定はもう終わっている（まだ始めていなかったものは、飛ばしたとみなす）
+        for (let i = 0; i < idx; i++) {
+          const p = blocks[i];
+          if (isInert(p) || p.fixed || p.actualEndMin !== undefined) continue;
+          if (isStarted(p, event.atMin)) {
+            const st = p.actualStartMin ?? p.startMin;
+            const end = Math.max(st, Math.min(p.endMin, event.atMin - target.travelMin));
+            blocks[i] = { ...p, actualStartMin: st, actualEndMin: end, startMin: st, endMin: end, durationMin: Math.max(1, end - st) };
+            touched.push(p.id);
+          } else if (p.label !== "buffer" && p.label !== "rest") {
+            blocks[i] = { ...p, skip: "skipped" as const };
+            passed.push(p.id);
+          }
+        }
+        blocks[idx] = {
+          ...target,
+          actualStartMin: event.atMin,
+          startMin: event.atMin,
+          endMin: event.atMin + target.durationMin,
+          notBefore: undefined,
+        };
+      } else {
+        const st = target.actualStartMin ?? target.startMin;
+        const end = Math.max(st, event.atMin);
+        lateBy = event.atMin - (target.endMin);
+        blocks[idx] = { ...target, actualStartMin: st, actualEndMin: end, startMin: st, endMin: end, durationMin: Math.max(1, end - st) };
+      }
+      day = { ...day, blocks };
+      // 遅れが10分以上なら「遅れ」、そうでなければ進み具合の反映
+      eventCause = lateBy >= PROGRESS_LATE_MIN ? { kind: "delay" } : { kind: "progress" };
+      steps.push({
+        phase: "event",
+        kind: "progress",
+        blockIds: touched,
+        detail: `${event.kind === "arrived" ? "着いた" : "出発した"} ${hm(event.atMin)}（予定より${lateBy >= 0 ? `${lateBy}分遅れ` : `${-lateBy}分早い`}）`,
+        cause: eventCause,
+      });
+      if (passed.length) steps.push({ phase: "event", kind: "skip", blockIds: passed, detail: "飛ばした予定", cause: { kind: "progress" } });
+      break;
+    }
+    case "detour": {
+      const id = nextId(allBlockIds(work), "dt");
+      let block: Block;
+      let label: string;
+      if ("spotId" in event.stop) {
+        const sp = ctx.spotById.get(event.stop.spotId);
+        if (!sp) break;
+        label = sp.name;
+        block = { id, label: "normal", spotId: sp.id, detour: true, durationMin: sp.stayMin, startMin: 0, endMin: sp.stayMin, travelMin: 0, travelMode: "none" };
+      } else {
+        const dur = Math.max(5, Math.round(event.stop.durationMin));
+        label = event.stop.name;
+        block = {
+          id,
+          label: "normal",
+          detour: true,
+          free: { name: event.stop.name, travelMin: FREE_STOP_TRAVEL_MIN },
+          durationMin: dur,
+          startMin: 0,
+          endMin: dur,
+          travelMin: FREE_STOP_TRAVEL_MIN,
+          travelMode: "walk",
+        };
+      }
+      const after = event.afterBlockId === undefined ? currentBlockId(day, now) : event.afterBlockId;
+      day = insertAfter(day, ctx, now, after, block);
+      eventCause = { kind: "detour" };
+      steps.push({ phase: "event", kind: "detour", blockIds: [id], detail: label, cause: eventCause });
+      break;
+    }
+    case "heat-rest": {
+      eventCause = { kind: "heat" };
+      const added: string[] = [];
+      for (const bid of event.blockIds) {
+        const idx = day.blocks.findIndex((b) => b.id === bid);
+        if (idx < 0) continue;
+        const b = day.blocks[idx];
+        const from = placeOf(b, ctx) ?? day.origin;
+        const later = new Set<string>(work.closedSpotIds);
+        day.blocks.forEach((x, i) => {
+          if (i > idx && !isInert(x) && x.spotId) later.add(x.spotId);
+        });
+        const found = pickRestSpot(ctx, day, from, undefined, b.endMin, event.minutes, REST_RADIUS_M.heavy, later);
+        const id = nextId([...allBlockIds(work), ...added], "r");
+        added.push(id);
+        day = insertAfter(day, ctx, now, bid, makeRestBlock(id, event.minutes, 0, found?.id));
+      }
+      steps.push({ phase: "event", kind: "insert-rest", blockIds: added, detail: "暑さ対策の休憩", cause: eventCause });
+      break;
+    }
+    case "extend-stay": {
+      day = {
+        ...day,
+        blocks: day.blocks.map((b) => (b.id === event.blockId ? { ...b, durationMin: b.durationMin + event.minutes, endMin: b.endMin + event.minutes } : b)),
+      };
+      eventCause = { kind: "user" };
+      steps.push({ phase: "event", kind: "extend-stay", blockIds: [event.blockId], detail: `${event.minutes}分延長`, cause: eventCause });
+      break;
+    }
+    case "add-buffer": {
+      const id = nextId(allBlockIds(work), "bf");
+      const block: Block = { id, label: "buffer", durationMin: event.minutes, startMin: 0, endMin: event.minutes, travelMin: 0, travelMode: "none" };
+      day = insertAfter(day, ctx, now, event.afterBlockId, block);
+      eventCause = { kind: "user" };
+      steps.push({ phase: "event", kind: "add-buffer", blockIds: [id], detail: `${event.minutes}分`, cause: eventCause });
+      break;
+    }
   }
 
   const otherUsed = new Set<string>();
@@ -881,7 +1040,7 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
     let d = d0;
     const pre: ReplanStep[] = [];
     if (opts.removeMustIds?.length) {
-      const ids = opts.removeMustIds.filter((id) => d.blocks.some((b) => b.id === id && (b.label === "must" || b.meal)));
+      const ids = opts.removeMustIds.filter((id) => d.blocks.some((b) => b.id === id && (b.label === "must" || b.meal || b.detour)));
       d = { ...d, blocks: d.blocks.map((b) => (ids.includes(b.id) ? { ...b, skip: "skipped" as const } : b)) };
       if (ids.length) pre.push({ phase: "event", kind: "drop-must", blockIds: ids, detail: "確認済み", cause: { kind: "user" } });
     }
@@ -1004,6 +1163,16 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
   };
 }
 
+/** いま進行中（開始済みで、まだ出発していない）のブロック。なければ、最後に開始した予定。どれもなければ null */
+function currentBlockId(day: Day, now: number | undefined): string | null {
+  let last: Block | undefined;
+  for (const b of day.blocks) {
+    if (isInert(b) || b.label === "buffer" || b.fixed) continue;
+    if (isStarted(b, now)) last = b;
+  }
+  return last?.id ?? null;
+}
+
 /** afterBlockId のブロックの次に block を入れる。null なら、これから行く予定（開始前）の先頭に入れる */
 function insertAfter(day: Day, ctx: PlanningContext, now: number | undefined, afterBlockId: string | null, block: Block): Day {
   let pos: number;
@@ -1051,6 +1220,19 @@ export function describeEvent(event: ReplanEvent, ctx: PlanningContext, itin: It
       return `「${nameOf(event.spotId)}」を予定に追加`;
     case "add-rest":
       return event.spotId ? `「${nameOf(event.spotId)}」で${event.minutes}分休む` : `休憩を${event.minutes}分入れる`;
+    case "progress": {
+      const b = itin.days.flatMap((d) => d.blocks).find((x) => x.id === event.blockId);
+      const name = b?.free?.name ?? nameOf(b?.spotId);
+      return `「${name}」に${event.kind === "arrived" ? "着いた" : "出発した"}（${hm(event.atMin)}）`;
+    }
+    case "detour":
+      return "name" in event.stop ? `寄り道：${event.stop.name}（${event.stop.durationMin}分）` : `寄り道：「${nameOf(event.stop.spotId)}」`;
+    case "heat-rest":
+      return `暑さ対策：屋外の予定の後に${event.minutes}分休憩（${event.blockIds.length}件）`;
+    case "extend-stay":
+      return `滞在を${event.minutes}分延長`;
+    case "add-buffer":
+      return `余白を${event.minutes}分増やす`;
     case "margin":
       return `固定時刻の余裕時間を${event.marginMin}分に変更`;
     case "skip":

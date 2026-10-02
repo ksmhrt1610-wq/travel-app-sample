@@ -4,7 +4,7 @@ import type { DepartureNotice } from "@/core/fixed";
 import { formatHHMM } from "@/core/time";
 import type { RestSuggestion } from "@/core/walking";
 import type { Block, PlanningContext } from "@/core/types";
-import { RAIN_STRENGTH, rainMm, type RainImpact, type RainOverride } from "@/core/weather";
+import { HEAT_LEVEL_LABEL, HEAT_RULES, RAIN_STRENGTH, rainMm, type HeatImpact, type HeatOverride, type RainImpact, type RainOverride } from "@/core/weather";
 import type { PlanBCandidate } from "@/core/planb";
 import { Button } from "./ui";
 
@@ -36,7 +36,7 @@ function Item({ block, ctx, showPlanB }: { block: Block; ctx: PlanningContext; s
 export interface AttentionBadge {
   id: string;
   text: string;
-  tone: "rain" | "closure" | "walk" | "departure";
+  tone: "rain" | "closure" | "walk" | "departure" | "heat";
   onClick: () => void;
 }
 
@@ -45,6 +45,7 @@ const BADGE_TONE: Record<AttentionBadge["tone"], string> = {
   closure: "border-rose-300 bg-rose-50 text-rose-900",
   walk: "border-teal-300 bg-teal-50 text-teal-900",
   departure: "border-amber-400 bg-amber-50 text-amber-950",
+  heat: "border-orange-400 bg-orange-50 text-orange-950",
 };
 
 export function AttentionBadges({ items }: { items: AttentionBadge[] }) {
@@ -117,6 +118,66 @@ export function RainBanner({
           </Button>
         )}
         <button type="button" onClick={onDismiss} className="min-h-9 text-xs font-semibold text-sky-800 underline" data-testid="rain-dismiss">
+          あとで
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * 暑さの通知バナー。11〜16時の屋外の予定について、
+ *   厳重警戒（WBGT 28以上）: Plan B に替える／屋外の予定の後に休憩を挟む
+ *   危険（WBGT 31以上）: すべて Plan B に替える
+ */
+export function HeatBanner({
+  impact,
+  heat,
+  ctx,
+  onSwitchAll,
+  onRest,
+  onDismiss,
+}: {
+  impact: HeatImpact;
+  heat: HeatOverride;
+  ctx: PlanningContext;
+  onSwitchAll: () => void;
+  onRest: () => void;
+  onDismiss: () => void;
+}) {
+  const total = impact.switchable.length + impact.noPlanB.length;
+  const danger = impact.level === "danger";
+  return (
+    <section
+      className={`animate-pop-in rounded-2xl border-2 p-4 shadow-md ${danger ? "border-red-500 bg-red-50" : "border-orange-400 bg-orange-50"}`}
+      role="alert"
+      data-testid="heat-banner"
+      data-level={impact.level}
+    >
+      <h2 className="text-[15px] font-extrabold text-slate-900">
+        🥵 {formatHHMM(heat.startMin)}から暑さ指数 {impact.wbgt}（{HEAT_LEVEL_LABEL[impact.level]}）
+      </h2>
+      <p className="mt-0.5 text-xs text-slate-800">
+        {formatHHMM(HEAT_RULES.windowStartMin)}〜{formatHHMM(HEAT_RULES.windowEndMin)}の屋外の予定 {total}件に影響します。
+        {danger ? "危険な暑さです。屋外の予定はすべて屋内に替えるのがおすすめです。" : "屋内に替えるか、屋外の予定のあとに休憩を挟めます。"}
+      </p>
+      <ul className="mt-2 space-y-1 rounded-xl bg-white/80 p-2.5" data-testid="heat-affected">
+        {[...impact.switchable, ...impact.noPlanB].map((b) => (
+          <Item key={b.id} block={b} ctx={ctx} showPlanB />
+        ))}
+      </ul>
+      <div className="mt-3 grid gap-2">
+        {impact.switchable.length > 0 && (
+          <Button onClick={onSwitchAll} data-testid="heat-switch-all" className="h-auto whitespace-normal bg-orange-600 py-2.5 text-center hover:bg-orange-700">
+            屋外の予定をすべて Plan B（屋内）に切り替える（{impact.switchable.length}件）
+          </Button>
+        )}
+        {!danger && (
+          <Button variant="secondary" onClick={onRest} data-testid="heat-rest" className="h-auto whitespace-normal py-2.5 text-center">
+            屋外の予定のあとに{HEAT_RULES.restMin}分の休憩を挟む
+          </Button>
+        )}
+        <button type="button" onClick={onDismiss} className="min-h-9 text-xs font-semibold text-slate-700 underline" data-testid="heat-dismiss">
           あとで
         </button>
       </div>

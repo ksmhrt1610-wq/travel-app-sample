@@ -166,6 +166,13 @@ export interface Block {
   skip?: "skipped";
   /** 食事ブロック（ランチ／ディナー）。削除せず、時刻・滞在・店の差し替えで調整する */
   meal?: MealSlot;
+  /** 実績: 実際に着いた時刻・出発した時刻（0:00 からの分）。あれば、時刻による「開始済み」の判定より優先する */
+  actualStartMin?: number;
+  actualEndMin?: number;
+  /** ユーザーが当日に入れた寄り道。エンジンが自動では削らない（Must が危うくなるときは「削る候補」として確認する） */
+  detour?: boolean;
+  /** 座標のない自由入力の寄り道。移動は travelMin 分と仮定する */
+  free?: FreeStop;
   /** 臨時休業 */
   closed?: boolean;
   /** 進行中ブロックを切り替えたとき、これより前には始められない */
@@ -179,6 +186,12 @@ export interface Block {
   fixed?: FixedEvent;
   /** スポットではない場所（駅・宿など）。固定時刻ブロックや、場所を決めない休憩で使う */
   place?: Origin;
+}
+
+export interface FreeStop {
+  name: string;
+  /** 直前の場所からの移動時間（分）。座標がないので、仮定の値 */
+  travelMin: number;
 }
 
 export interface Origin extends LatLng {

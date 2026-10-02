@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { formatHHMM } from "@/core/time";
 import type { Block, PlanningContext } from "@/core/types";
-import { RAIN_STRENGTH, type RainOverride, type RainStrength } from "@/core/weather";
+import { HEAT_LEVEL_LABEL, HEAT_RULES, RAIN_STRENGTH, type HeatOverride, type RainOverride, type RainStrength } from "@/core/weather";
 import { Button, cx } from "./ui";
 
 export const SIM_MIN = 6 * 60;
@@ -17,6 +17,9 @@ interface Props {
   rain?: RainOverride;
   onRain: (rain: RainOverride) => void;
   onStopRain: () => void;
+  heat?: HeatOverride;
+  onHeat: (heat: HeatOverride) => void;
+  onStopHeat: () => void;
   onDelay: (minutes: number) => void;
   /** 臨時休業にできるスポット（これから行く予定のスポット） */
   closable: Block[];
@@ -26,7 +29,7 @@ interface Props {
 }
 
 /** デモ用のシミュレーション操作パネル（画面下に固定。折りたたみ可） */
-export function SimulationPanel({ nowMin, onNowChange, rain, onRain, onStopRain, onDelay, closable, ctx, onClose, onReset }: Props) {
+export function SimulationPanel({ nowMin, onNowChange, rain, onRain, onStopRain, heat, onHeat, onStopHeat, onDelay, closable, ctx, onClose, onReset }: Props) {
   const [open, setOpen] = useState(false);
   const [strength, setStrength] = useState<RainStrength>("moderate");
   const [rainStart, setRainStart] = useState<number | null>(null); // null = 現在時刻
@@ -50,6 +53,7 @@ export function SimulationPanel({ nowMin, onNowChange, rain, onRain, onStopRain,
           <span className="rounded-md bg-white/15 px-2 py-0.5 text-sm font-bold tabular-nums" data-testid="sim-now-label">
             🕐 {formatHHMM(nowMin)}
           </span>
+          {heat && <span className="rounded-md bg-orange-500 px-1.5 py-0.5 text-xs font-bold">🥵 {heat.wbgt}</span>}
           {rain && (
             <span className="rounded-md bg-sky-500 px-1.5 py-0.5 text-xs font-bold">
               ☔ {rain.strength ? RAIN_STRENGTH[rain.strength].label : `${rain.prob}%`}
@@ -158,6 +162,31 @@ export function SimulationPanel({ nowMin, onNowChange, rain, onRain, onStopRain,
                   雨を止める
                 </Button>
               </div>
+            </section>
+
+            {/* 暑さ */}
+            <section className="rounded-xl bg-orange-50 p-3">
+              <h3 className="mb-1.5 text-xs font-bold text-orange-900">🥵 暑くなる（暑さ指数 WBGT）</h3>
+              <div className="grid grid-cols-2 gap-2">
+                {([HEAT_RULES.warning, HEAT_RULES.danger] as const).map((w) => (
+                  <Button
+                    key={w}
+                    variant="secondary"
+                    onClick={() => {
+                      onHeat({ startMin: Math.max(nowMin, HEAT_RULES.windowStartMin), wbgt: w });
+                      setOpen(false);
+                    }}
+                    data-testid={`sim-heat-${w}`}
+                    className="h-auto whitespace-normal border-orange-300 py-2 text-center"
+                  >
+                    WBGT {w}
+                    <span className="block text-[11px] font-medium text-slate-500">{HEAT_LEVEL_LABEL[w >= HEAT_RULES.danger ? "danger" : "warning"]}</span>
+                  </Button>
+                ))}
+              </div>
+              <Button variant="secondary" onClick={onStopHeat} disabled={!heat} className="mt-2 w-full" data-testid="sim-heat-stop">
+                暑さをおさめる{heat ? `（いま WBGT ${heat.wbgt}）` : ""}
+              </Button>
             </section>
 
             {/* 遅延 */}

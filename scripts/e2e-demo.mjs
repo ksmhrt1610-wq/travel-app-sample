@@ -472,6 +472,103 @@ try {
   await page.waitForSelector(q("mode-switch"));
   check("再読み込みしても、おまかせのまま", (await page.getAttribute(q("mode-switch"), "data-mode")) === "auto");
   await page.click(q("mode-suggest"));
+
+  /* ====================================================================
+   * シナリオD: 当日の出来事（実績・寄り道・暑さ・早く進んだ）
+   * ==================================================================== */
+
+  step("D1. 太宰府の旅程（最終便なし）を作って、当日モードを開く");
+  await page.evaluate(() => localStorage.clear());
+  await page.goto(BASE);
+  await page.waitForSelector(q("generate"));
+  await page.click(q("pace-normal"));
+  await page.click(q("interest-history"));
+  await page.click(q("must-toggle"));
+  await page.click(q("must-dazaifu-shrine"));
+  await page.click(q("must-dazaifu-kyuhaku"));
+  await page.click(q("generate"));
+  await page.waitForURL("**/itinerary");
+  await page.waitForSelector(q("timeline"));
+  await page.click(q("go-today"));
+  await page.waitForURL("**/today");
+  await page.waitForSelector(q("next-card"));
+  const d0 = await readBlocks();
+  const kyuhaku = d0.find((b) => b.spotId === "dazaifu-kyuhaku");
+  const afterKyuhaku = d0[d0.findIndex((b) => b.spotId === "dazaifu-kyuhaku") + 1];
+
+  step("D2. 「出発した」を予定より20分遅く押すと、後ろの予定が遅れる");
+  const lateAt = Math.ceil((kyuhaku.end + 20) / 5) * 5;
+  await setNowSlider(lateAt);
+  await closeSim();
+  await page.waitForSelector(q("progress-departed"));
+  check("予定の終了時刻を過ぎても、「出発した」を押せる", await page.locator(q("progress-departed")).isVisible());
+  await page.click(q("progress-departed"));
+  await page.waitForFunction(() => document.querySelector('[data-testid="diff-title"]')?.textContent?.includes("出発した"));
+  const d1 = await readBlocks();
+  const kyuhakuAfter = d1.find((b) => b.spotId === "dazaifu-kyuhaku");
+  check(`実績の出発時刻が記録される（${Math.floor(lateAt / 60)}:${String(lateAt % 60).padStart(2, "0")}）`, kyuhakuAfter.end === lateAt && (await page.locator(q("actual-end")).count()) >= 1);
+  const nextAfter = d1.find((b) => b.id === afterKyuhaku.id);
+  check(`次の予定が遅れる（${afterKyuhaku.start} → ${nextAfter.start}）`, nextAfter.start > afterKyuhaku.start && nextAfter.start - afterKyuhaku.start >= lateAt - kyuhaku.end - 15);
+  check("遅れの反映は軽い変更なので、そのまま反映され、元に戻せる", (await page.locator(q("proposal-card")).count()) === 0 && (await page.locator(q("undo-latest")).count()) === 1);
+
+  step("D3. 寄り道: 「ここに寄る」（自由入力）で1件追加する");
+  await page.click(q("detour-button"));
+  await page.waitForSelector(q("detour-sheet"));
+  check("近くの営業中のスポットの候補か、見つからない旨が出る", (await page.locator(q("detour-candidates")).count()) + (await page.locator(q("detour-empty")).count()) === 1);
+  check("自由入力は、移動を10分と仮定する旨が出る", (await text("detour-free-note")).includes("10分"));
+  await page.fill(q("detour-free-name"), "お土産を見る");
+  await page.click(q("detour-free-submit"));
+  await page.waitForSelector(q("block-free"));
+  check("寄り道が旅程に入る（移動は10分の仮定が出る）", (await text("block-free")).includes("お土産を見る") && (await text("block-free")).includes("10分と仮定"));
+  check("理由に「寄り道を入れたため」が出る", (await text("diff-panel")).includes("寄り道を入れたため"));
+  const d2 = await readBlocks();
+  check("寄り道のあとの予定が、さらに後ろにずれている", d2.find((b) => b.id === afterKyuhaku.id).start >= nextAfter.start);
+
+  step("D4. 暑さ（WBGT 31）: 昼の屋外の予定の対応");
+  await openSim();
+  await page.click(q("sim-heat-31"));
+  await page.waitForSelector(q("heat-banner"));
+  check("暑さの通知が出る（危険）", (await page.getAttribute(q("heat-banner"), "data-level")) === "danger" && (await text("heat-banner")).includes("危険"));
+  check("影響する屋外の予定が列挙される", (await page.locator(`${q("heat-affected")} li`).count()) >= 1);
+  check("危険のときは、休憩ではなく Plan B への切り替えだけが出る", (await page.locator(q("heat-switch-all")).count()) === 1 && (await page.locator(q("heat-rest")).count()) === 0);
+  await page.click(q("heat-switch-all"));
+  await page.waitForSelector(`${q("proposal-card")}, ${q("diff-panel")}`);
+  const mustSwap = (await page.locator(q("proposal-heavy")).count()) === 1;
+  check("Must の屋外（太宰府天満宮）の入れ替えは、重い変更として確認が出る", mustSwap && (await text("proposal-heavy")).includes("Must を別のスポットに入れ替える"));
+  if (mustSwap) await page.click(q("proposal-cancel"));
+  await openSim();
+  await page.click(q("sim-heat-stop"));
+
+  step("D5. 少し休みたい: いま滞在中のカフェで休憩が延長される");
+  const starbucks = (await readBlocks()).find((b) => b.spotId === "dazaifu-starbucks");
+  const mid = Math.floor((starbucks.start + starbucks.end) / 2 / 5) * 5;
+  await setNowSlider(mid);
+  await closeSim();
+  await page.click(q("tired-button"));
+  await page.click(q("tired-light"));
+  await page.waitForSelector(q("block-rest"));
+  check("スターバックス滞在中の休憩は「ここで休憩を延長」になる", (await page.getAttribute(`${q("block-rest")} [data-rest-mode]`, "data-rest-mode")) === "extend");
+
+  step("D6. 早く進んだ（30分以上）: 提案が出る。自動では変わらない");
+  await openSim();
+  await page.click(q("sim-reset"));
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="diff-panel"]').length === 0);
+  const r0 = await readBlocks();
+  const k0 = r0.find((b) => b.spotId === "dazaifu-kyuhaku");
+  const earlyAt = Math.floor((k0.end - 35) / 5) * 5;
+  await setNowSlider(earlyAt);
+  await closeSim();
+  await page.click(q("progress-departed"));
+  await page.waitForSelector(q("early-card"));
+  check("予定より30分以上早く出発すると、「早く進んでいます」の提案が出る", (await text("early-card")).includes("早く進んでいます"));
+  check("近くのスポット追加・余白を増やす提案がある", (await page.locator(q("early-add-optional")).count()) + (await page.locator(q("early-add-buffer")).count()) >= 1);
+  const buffersBefore = await page.locator(q("block-buffer")).count();
+  check("提案は、選ぶまで旅程に入らない（自動では変わらない）", (await page.locator(q("block-free")).count()) === 0);
+  if (await page.locator(q("early-add-buffer")).count()) {
+    await page.click(q("early-add-buffer"));
+    await page.waitForFunction((n) => document.querySelectorAll('[data-testid="block-buffer"]').length > n, buffersBefore);
+    check("「余白を増やす」を選ぶと、余白が増える", (await page.locator(q("block-buffer")).count()) > buffersBefore);
+  }
 } catch (e) {
   failures++;
   console.error("\n✗ シナリオ中にエラー:", e.message);

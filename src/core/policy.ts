@@ -106,9 +106,11 @@ export type ApplyAction = "apply" | "propose";
  * 組み直しを、そのまま反映するか（元に戻すトースト付き）、差分を見せて確定を求めるか。
  *   重い変更: どのモードでも必ず確認
  *   軽い変更: 手動なら確認、提案・おまかせならそのまま反映（提案はユーザーのタップ、おまかせはアプリが自動で）
+ *   例外: 実績（着いた・出発した）の記録は事実なので、軽い変更なら手動モードでも確認なしで記録する
  */
-export function decideApply(mode: ResponseMode, weight: ChangeWeight): ApplyAction {
+export function decideApply(mode: ResponseMode, weight: ChangeWeight, event?: { type: string }): ApplyAction {
   if (weight === "heavy") return "propose";
+  if (event?.type === "progress") return "apply";
   return mode === "manual" ? "propose" : "apply";
 }
 

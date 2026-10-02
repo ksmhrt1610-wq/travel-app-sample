@@ -3,7 +3,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 import type { ChangeSet } from "@/core/diff";
 import type { Itinerary, Preferences } from "@/core/types";
-import type { RainOverride } from "@/core/weather";
+import type { HeatOverride, RainOverride } from "@/core/weather";
 
 /** 当日モードの状態（デモ用シミュレーションを含む）。localStorage に保存する */
 export interface TodayState {
@@ -15,6 +15,10 @@ export interface TodayState {
   rain?: RainOverride;
   /** 雨の通知を閉じたときの rain の識別子 */
   rainDismissed?: string;
+  /** デモ用の「暑くなる」操作（暑さ指数 WBGT） */
+  heat?: HeatOverride;
+  /** 暑さの通知を閉じたときの heat の識別子 */
+  heatDismissed?: string;
   /** 閉じた通知（出発の通知・歩行距離の提案）の識別子 */
   dismissed?: string[];
   history: ChangeSet[];

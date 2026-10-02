@@ -18,6 +18,7 @@ function nameOf(itin: Itinerary, ctx: PlanningContext, id: string): string {
   const b = blockOf(itin, id);
   if (!b) return "予定";
   if (b.fixed) return b.fixed.title;
+  if (b.free) return b.free.name;
   if (b.spotId) return ctx.spotById.get(b.spotId)?.name ?? "予定";
   return b.label === "rest" ? "休憩" : "余白";
 }
@@ -55,6 +56,14 @@ function stepText(step: ReplanStep, r: ReplanResult, ctx: PlanningContext): stri
       return "固定時刻を外す";
     case "fixed-move":
       return `固定時刻を変更：${step.detail}`;
+    case "progress":
+      return `実際の進み具合を反映：${step.detail}`;
+    case "detour":
+      return `寄り道を追加：${step.detail}`;
+    case "extend-stay":
+      return `滞在を延長：${names(step.blockIds)}（${step.detail}）`;
+    case "add-buffer":
+      return `余白を追加（${step.detail}）`;
     case "add-spot":
       return `予定に追加：${step.detail}`;
     case "meal-shorten":

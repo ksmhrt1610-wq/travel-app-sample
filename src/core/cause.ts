@@ -27,6 +27,8 @@ export type Cause =
   | { kind: "delay" }
   /** 寄り道を入れたため */
   | { kind: "detour" }
+  /** 実際の進み具合（着いた・出発した）を反映したため */
+  | { kind: "progress" }
   /** ユーザー自身の操作 */
   | { kind: "user" };
 
@@ -102,6 +104,8 @@ export const templateWriter: ExplanationWriter = {
         return "遅れを反映したため";
       case "detour":
         return "寄り道を入れたため";
+      case "progress":
+        return "実際の進み具合を反映したため";
       case "user":
         return "操作したため";
     }

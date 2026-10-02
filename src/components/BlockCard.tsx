@@ -129,6 +129,30 @@ export function BlockCard({ block, ctx, inProgress, change, handle, departure, a
     );
   }
 
+  /* ---- 自由入力の寄り道（座標なし） ---- */
+  if (block.free) {
+    return (
+      <div className={cx("rounded-2xl border shadow-sm", style.card, inert && "opacity-60", ring)} data-testid="block-free" data-block-id={block.id} data-start={block.startMin} data-end={block.endMin}>
+        <button type="button" onClick={onOpen} className="flex w-full items-center gap-2 px-3 py-2.5 text-left">
+          <span className="text-xl">🚶</span>
+          <span className="flex-1">
+            <span className="block text-sm font-bold text-slate-900">{block.free.name}</span>
+            <span className="block text-xs text-slate-600">
+              {formatDuration(block.endMin - block.startMin)}・場所は決まっていません（移動は約{block.free.travelMin}分と仮定）
+            </span>
+            <span className="mt-0.5 flex flex-wrap gap-1">
+              <Chip className="bg-amber-100 text-amber-800">寄り道</Chip>
+              {block.actualStartMin !== undefined && <Chip className="bg-emerald-100 text-emerald-800">📍 着 {formatHHMM(block.actualStartMin)}</Chip>}
+              {block.actualEndMin !== undefined && <Chip className="bg-emerald-100 text-emerald-800">🚪 出 {formatHHMM(block.actualEndMin)}</Chip>}
+              <AbsentChips names={absent} />
+            </span>
+          </span>
+        </button>
+        {change && <ChangeNote item={change} ctx={ctx} />}
+      </div>
+    );
+  }
+
   if (!spot) {
     const minutes = block.endMin - block.startMin;
     return (
@@ -188,6 +212,9 @@ export function BlockCard({ block, ctx, inProgress, change, handle, departure, a
           <div className="mt-1.5 flex flex-wrap gap-1">
             {inProgress && <Chip className="bg-brand-600 text-white">いま</Chip>}
             {block.meal && <Chip className="bg-orange-100 text-orange-800">🍽 {MEAL_LABEL[block.meal]}</Chip>}
+            {block.detour && <Chip className="bg-amber-100 text-amber-800">寄り道</Chip>}
+            {block.actualStartMin !== undefined && <Chip className="bg-emerald-100 text-emerald-800" ><span data-testid="actual-start">📍 着 {formatHHMM(block.actualStartMin)}</span></Chip>}
+            {block.actualEndMin !== undefined && <Chip className="bg-emerald-100 text-emerald-800"><span data-testid="actual-end">🚪 出 {formatHHMM(block.actualEndMin)}</span></Chip>}
             {block.switched && <Chip className="bg-emerald-100 text-emerald-800">🔁 Plan B に切替済み</Chip>}
             {closed && <Chip className="bg-rose-100 text-rose-700">⛔ 臨時休業</Chip>}
             {skipped && !closed && <Chip className="bg-slate-200 text-slate-600">スキップ</Chip>}

@@ -1,7 +1,7 @@
 import { findOpenSlot } from "./availability";
 import { earlierServices, fixedDeparture } from "./fixed";
 import { haversineM } from "./geo";
-import { dayTravel, DEFAULT_MARGIN_MIN, isInert, placeOf } from "./schedule";
+import { dayTravel, DEFAULT_MARGIN_MIN, isInert, isStarted, placeOf } from "./schedule";
 import { baseScore } from "./scoring";
 import { formatHHMM } from "./time";
 import type { ReplanEvent } from "./replan";
@@ -25,7 +25,7 @@ const MIN_WAIT_MIN = 30;
 
 export interface Suggestion {
   id: string;
-  kind: "earlier-transport" | "add-optional" | "wait-nearby";
+  kind: "earlier-transport" | "add-optional" | "wait-nearby" | "extend-stay" | "add-buffer";
   title: string;
   detail: string;
   /** 選んだときに replan へ渡すイベント */
@@ -155,4 +155,122 @@ export function suggestForGap(before: Itinerary, after: Itinerary, ctx: Planning
   const gapBefore = bDay ? lastTransportGap(bDay, ctx, before.settings?.marginMin ?? DEFAULT_MARGIN_MIN, opts.nowMin) : null;
   if (gapBefore && gapBefore.gapMin >= gapAfter.gapMin) return [];
   return suggestionsForDay(after, ctx, opts);
+}
+
+/* ---------- 早く進んだとき（実績: 着いた・出発した） ---------- */
+
+/** 予定より何分以上早く進んだら提案するか */
+export const EARLY_SUGGEST_MIN = 30;
+
+export interface EarlyProgress {
+  /** 実績を記録した、いちばん新しい予定 */
+  anchorBlockId: string;
+  /** 予定より何分早く進んでいるか */
+  earlyByMin: number;
+  /** 次の予定までに使える空き（分） */
+  idleMin: number;
+  /** まだその予定にいる（着いたが、まだ出発していない） */
+  stillThere: boolean;
+  nextBlockId: string;
+}
+
+/**
+ * 実績（着いた・出発した）から、予定より早く進んでいるかを求める。
+ * 確定済みの旅程から毎回導出するので、どのモードで記録しても、同じ提案が出る（提案のみで、自動では反映しない）。
+ */
+export function earlyProgress(day: Day, ctx: PlanningContext, nowMin: number): EarlyProgress | null {
+  let anchorIdx = -1;
+  day.blocks.forEach((b, i) => {
+    if (!isInert(b) && (b.actualStartMin !== undefined || b.actualEndMin !== undefined)) anchorIdx = i;
+  });
+  if (anchorIdx < 0) return null;
+  const anchor = day.blocks[anchorIdx];
+  const departed = anchor.actualEndMin !== undefined;
+  const planned = departed ? (anchor.plannedEndMin ?? anchor.endMin) : (anchor.plannedStartMin ?? anchor.startMin);
+  const actual = departed ? anchor.actualEndMin! : anchor.actualStartMin!;
+  const earlyByMin = planned - actual;
+  if (earlyByMin < EARLY_SUGGEST_MIN) return null;
+
+  const next = day.blocks.find(
+    (b, i) => i > anchorIdx && !isInert(b) && !isStarted(b, nowMin) && b.label !== "buffer" && b.label !== "rest" && (!!placeOf(b, ctx) || !!b.free || !!b.fixed),
+  );
+  if (!next) return null;
+  const idleMin = next.startMin - (anchor.endMin + next.travelMin);
+  if (idleMin < 15) return null;
+  return { anchorBlockId: anchor.id, earlyByMin, idleMin, stillThere: !departed, nextBlockId: next.id };
+}
+
+/**
+ * 早く進んだときの提案（モードに関係なく、提案のみ）。
+ *   - いまの場所での滞在延長（まだその予定にいるとき）
+ *   - 近く（1km以内）の、まだ旅程に入っていないスポットを1件追加
+ *   - 余白を増やす
+ */
+export function suggestForEarly(itin: Itinerary, ctx: PlanningContext, opts: { dayIndex: number; nowMin: number }): Suggestion[] {
+  const day = itin.days[opts.dayIndex];
+  if (!day) return [];
+  const early = earlyProgress(day, ctx, opts.nowMin);
+  if (!early) return [];
+  const anchor = day.blocks.find((b) => b.id === early.anchorBlockId)!;
+  const next = day.blocks.find((b) => b.id === early.nextBlockId)!;
+  const travel = dayTravel(day, ctx);
+  const out: Suggestion[] = [];
+  const free = Math.floor(early.idleMin / 5) * 5;
+
+  // 1. いまの場所での滞在延長
+  const here = anchor.spotId ? ctx.spotById.get(anchor.spotId) : undefined;
+  if (early.stillThere && here) {
+    const minutes = Math.floor(Math.min(free, 60) / 5) * 5;
+    const ok = minutes >= 15 && findOpenSlot(here, day.date, anchor.startMin, anchor.durationMin + minutes)?.start === anchor.startMin;
+    if (ok) {
+      out.push({
+        id: `extend:${anchor.id}`,
+        kind: "extend-stay",
+        title: `「${here.name}」での滞在を${minutes}分延長`,
+        detail: `予定より${early.earlyByMin}分早く進んでいます。ここでゆっくりできます。`,
+        event: { type: "extend-stay", blockId: anchor.id, minutes },
+      });
+    }
+  }
+
+  // 2. 近くのスポットを1件追加
+  const from: LatLng = placeOf(anchor, ctx) ?? day.origin;
+  const nextPlace = placeOf(next, ctx) ?? (next.fixed?.place as LatLng | undefined);
+  const used = new Set<string>(itin.closedSpotIds);
+  for (const d of itin.days) for (const b of d.blocks) if (b.spotId) used.add(b.spotId);
+  let best: { id: string; name: string; stay: number; score: number } | null = null;
+  for (const sp of ctx.spots) {
+    if (used.has(sp.id) || sp.mealSlots) continue;
+    const d = haversineM(from, sp);
+    if (d > NEARBY_M) continue;
+    const arrive = anchor.endMin + travel(from, sp).minutes;
+    const slot = findOpenSlot(sp, day.date, arrive, sp.stayMin);
+    if (!slot) continue;
+    const end = slot.start + sp.stayMin;
+    const back = nextPlace ? travel(sp, nextPlace).minutes : next.travelMin;
+    if (end + back > next.startMin) continue;
+    const score = baseScore(sp, itin.prefs) - d / 1000;
+    if (!best || score > best.score) best = { id: sp.id, name: sp.name, stay: sp.stayMin, score };
+  }
+  if (best) {
+    out.push({
+      id: `add:${best.id}`,
+      kind: "add-optional",
+      title: `近くの「${best.name}」にも寄る`,
+      detail: `${best.stay}分の Optional として追加します。次の予定には間に合います。`,
+      event: { type: "add-spot", spotId: best.id, afterBlockId: anchor.id, label: "optional" },
+    });
+  }
+
+  // 3. 余白を増やす
+  if (free >= 15) {
+    out.push({
+      id: `buffer:${anchor.id}`,
+      kind: "add-buffer",
+      title: `余白を${free}分増やす`,
+      detail: "予定を足さず、ゆっくり休んだり移動したりする時間にします。",
+      event: { type: "add-buffer", afterBlockId: anchor.id, minutes: free },
+    });
+  }
+  return out;
 }

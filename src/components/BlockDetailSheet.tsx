@@ -15,6 +15,7 @@ import {
   travelLabel,
 } from "@/core/labels";
 import { mapsDirectionsUrl, mapsSearchUrl } from "@/core/maps";
+import { isStarted } from "@/core/schedule";
 import { formatDuration, formatHHMM, weekdayOf } from "@/core/time";
 import type { Block, Day, PlanningContext, Spot } from "@/core/types";
 import { delayOf, shortenedFrom } from "./BlockCard";
@@ -80,7 +81,7 @@ export function BlockDetailSheet({ open, onClose, block, day, ctx, mode, nowMin,
   const index = day.blocks.findIndex((b) => b.id === block.id);
   const delay = delayOf(block);
   const shortFrom = shortenedFrom(block);
-  const started = nowMin !== undefined && block.startMin <= nowMin;
+  const started = isStarted(block, nowMin);
   const inert = block.skip === "skipped" || !!block.closed;
   const absentNote = absent?.length ? (
     <p className="rounded-lg bg-fuchsia-50 px-3 py-2 text-xs font-semibold text-fuchsia-900">👤 {absent.join("・")}不在（固定時刻のため、先にグループを抜けています）</p>
@@ -127,6 +128,33 @@ export function BlockDetailSheet({ open, onClose, block, day, ctx, mode, nowMin,
               この固定時刻を外す
             </Button>
           )}
+        </div>
+      </Sheet>
+    );
+  }
+
+  /* ---- 自由入力の寄り道 ---- */
+  if (block.free) {
+    return (
+      <Sheet open={open} onClose={onClose} title={`🚶 ${block.free.name}`} testId="detail-sheet">
+        <div className="space-y-3">
+          <div className="flex flex-wrap gap-1.5">
+            <Chip className="bg-amber-100 text-amber-800">寄り道</Chip>
+          </div>
+          <p className="text-lg font-bold tabular-nums text-slate-900">
+            {formatHHMM(block.startMin)}〜{formatHHMM(block.endMin)}
+            <span className="ml-2 text-sm font-semibold text-slate-500">（{formatDuration(block.endMin - block.startMin)}）</span>
+          </p>
+          <p className="rounded-xl bg-amber-50 p-3 text-sm leading-relaxed text-amber-900">
+            ご自身で入力した寄り道です。場所が決まっていないので、移動は直前の場所から約{block.free.travelMin}分と仮定しています。時間が足りなくなっても、自動では削りません（Must が危ういときは、確認します）。
+          </p>
+          {block.actualStartMin !== undefined && <p className="text-xs text-slate-600">着いた：{formatHHMM(block.actualStartMin)}{block.actualEndMin !== undefined && `／出発した：${formatHHMM(block.actualEndMin)}`}</p>}
+          {mode !== "view" && !inert && onSkip && (
+            <Button variant="secondary" className="w-full" onClick={() => onSkip(block.id)} data-testid="skip-block">
+              この寄り道をやめる
+            </Button>
+          )}
+          {absentNote}
         </div>
       </Sheet>
     );

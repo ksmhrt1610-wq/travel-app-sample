@@ -4,9 +4,11 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { adapters } from "@/adapters";
 import { BlockDetailSheet } from "@/components/BlockDetailSheet";
-import { AttentionBadges, ClosureBanner, DepartureBanner, RainBanner, WalkBanner, type AttentionBadge } from "@/components/Banners";
+import { AttentionBadges, ClosureBanner, DepartureBanner, HeatBanner, RainBanner, WalkBanner, type AttentionBadge } from "@/components/Banners";
 import { ModeSwitch } from "@/components/ModeSwitch";
+import { DetourSheet, type DetourStop } from "@/components/DetourSheet";
 import { DiffPanel } from "@/components/DiffPanel";
+import { EarlyCard } from "@/components/EarlyCard";
 import { FixedTimesPanel } from "@/components/FixedTimesPanel";
 import { NextActionCard } from "@/components/NextActionCard";
 import { ProposalCard } from "@/components/ProposalCard";
@@ -17,16 +19,17 @@ import { Timeline } from "@/components/Timeline";
 import { WalkMeter } from "@/components/WalkMeter";
 import { Button, cx, useToast } from "@/components/ui";
 import { suggestReplacement } from "@/core/actions";
+import { currentBlock, currentLocation, nearbyOpenSpots } from "@/core/detour";
 import { absenceByBlock, departureNotices, memberFixedStatuses, nextFixedCountdown } from "@/core/fixed";
 import { commitResult, itineraryChanged, undoLast } from "@/core/history";
 import { canAutoApply, classifyChange, decideApply, modeOf, type ChangeWeight, type Classification } from "@/core/policy";
 import { describeEvent, replan, type ReplanEvent, type ReplanResult } from "@/core/replan";
-import type { Suggestion } from "@/core/suggest";
+import { earlyProgress, suggestForEarly, type Suggestion } from "@/core/suggest";
 import { formatDateJa, formatHHMM } from "@/core/time";
 import { getNextAction } from "@/core/today";
 import type { Itinerary, ResponseMode } from "@/core/types";
 import { dayWalking, suggestRestForWalking } from "@/core/walking";
-import { detectRainImpact, RAIN_RULES, RAIN_STRENGTH, rainMm, type HourlyWeather, type RainOverride } from "@/core/weather";
+import { detectHeatImpact, detectRainImpact, HEAT_RULES, RAIN_RULES, RAIN_STRENGTH, rainMm, type HeatOverride, type HourlyWeather, type RainOverride } from "@/core/weather";
 import { useTrip, type TodayState } from "@/store/tripStore";
 import { usePlanningContext } from "@/store/usePlanningContext";
 
@@ -53,12 +56,15 @@ interface Proposal {
  * おまかせモード: アプリが気づいた出来事のうち、軽い変更を自動で反映する（タップなし）。
  * 同じ出来事（キー）には1回しか反応しない。重い変更は自動では反映せず、通知バナーで確認を求める。
  */
-function AutoResponder({ enabled, rainKey, rainTarget, walkKey, onRain, onWalk }: {
+function AutoResponder({ enabled, rainKey, rainTarget, heatKey, heatTarget, walkKey, onRain, onHeat, onWalk }: {
   enabled: boolean;
   rainKey: string | null;
   rainTarget: number;
+  heatKey: string | null;
+  heatTarget: number;
   walkKey: string | null;
   onRain: () => void;
+  onHeat: () => void;
   onWalk: () => void;
 }) {
   const handled = useRef(new Set<string>());
@@ -70,6 +76,14 @@ function AutoResponder({ enabled, rainKey, rainTarget, walkKey, onRain, onWalk }
     onRain();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, rainKey, rainTarget]);
+  useEffect(() => {
+    if (!enabled || !heatKey || heatTarget === 0) return;
+    const key = `heat:${heatKey}:${heatTarget}`;
+    if (handled.current.has(key)) return;
+    handled.current.add(key);
+    onHeat();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, heatKey, heatTarget]);
   useEffect(() => {
     if (!enabled || !walkKey) return;
     if (handled.current.has(walkKey)) return;
@@ -88,6 +102,7 @@ export default function TodayPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [tiredOpen, setTiredOpen] = useState(false);
+  const [detourOpen, setDetourOpen] = useState(false);
   const [proposal, setProposal] = useState<Proposal | null>(null);
   const toast = useToast();
 
@@ -125,6 +140,11 @@ export default function TodayPage() {
     [day, ctx, today?.rain, weather, nowMin, itin],
   );
 
+  const heatImpact = useMemo(
+    () => (day && ctx && today?.heat ? detectHeatImpact(day, ctx, weather, nowMin, today.heat) : { level: "none" as const, wbgt: 0, switchable: [], noPlanB: [] }),
+    [day, ctx, today?.heat, weather, nowMin],
+  );
+
   const closedBlocks = useMemo(() => (day ? day.blocks.filter((b) => b.closed && b.skip !== "skipped" && b.endMin > nowMin) : []), [day, nowMin]);
   const suggestions = useMemo(
     () => (ctx && itin ? new Map(closedBlocks.map((b) => [b.id, suggestReplacement(itin, b.id, ctx)])) : new Map()),
@@ -159,7 +179,7 @@ export default function TodayPage() {
     const result = replan(today.itinerary, event, ctx, { dayIndex: today.dayIndex, nowMin: today.nowMin, removeMustIds });
     const title = describeEvent(event, ctx, today.itinerary);
     const classification = classifyChange(result, ctx);
-    if (decideApply(mode, classification.weight) === "apply") {
+    if (decideApply(mode, classification.weight, event) === "apply") {
       commit(result, title, { weight: classification.weight });
       return;
     }
@@ -207,6 +227,32 @@ export default function TodayPage() {
     if (canAutoApply(mode, classification.weight)) commit(result, `雨のため、屋外の予定${impact.switchable.length}件を Plan B に切り替え`, { weight: "light", auto: true });
   };
 
+  /** 暑さ対策の案: 屋外の予定を Plan B に替える（なければ、屋外の予定のあとに休憩を挟む） */
+  const heatEvent = (): ReplanEvent | null =>
+    heatImpact.switchable.length
+      ? { type: "plan-b", blockIds: heatImpact.switchable.map((b) => b.id), cause: "heat" }
+      : heatImpact.noPlanB.length
+        ? { type: "heat-rest", blockIds: heatImpact.noPlanB.map((b) => b.id), minutes: HEAT_RULES.restMin }
+        : null;
+
+  /** おまかせ: 暑さで影響のある屋外の予定を、軽い変更なら自動で Plan B に切り替える */
+  const autoHeat = () => {
+    const event = heatEvent();
+    if (!event) return;
+    const result = replan(today.itinerary, event, ctx, { dayIndex: today.dayIndex, nowMin: today.nowMin });
+    const classification = classifyChange(result, ctx);
+    if (canAutoApply(mode, classification.weight)) commit(result, `暑さのため、${describeEvent(event, ctx, today.itinerary)}`, { weight: "light", auto: true });
+  };
+
+  /** 実績: 着いた・出発した（押した時刻が実績になる）。遅れは後ろをずらし、足りなければ規則どおり削減する */
+  const recordProgress = (blockId: string, kind: "arrived" | "departed") => propose({ type: "progress", blockId, kind, atMin: today.nowMin });
+
+  /** 早く進んだときの提案を選ぶ（提案のみ。選ぶと、新しい組み直しになる） */
+  const applyEarly = (s: Suggestion) => {
+    if (earlyDismissKey) dismiss(earlyDismissKey);
+    propose(s.event);
+  };
+
   /** おまかせ: 歩行距離が目安を超えそうなときの休憩を、軽い変更なら自動で入れる */
   const autoWalk = () => {
     if (!walkSuggest) return;
@@ -239,6 +285,16 @@ export default function TodayPage() {
   const rainAffected = impact.switchable.length + impact.noPlanB.length;
   const showRainBanner = !!today.rain && rainKey !== today.rainDismissed && rainAffected > 0;
   const tolerance = itin.prefs.rainTolerance;
+  const heatKey = today.heat ? `${today.heat.wbgt}@${today.heat.startMin}` : null;
+  const heatAffected = heatImpact.switchable.length + heatImpact.noPlanB.length;
+  const showHeatBanner = !!today.heat && heatKey !== today.heatDismissed && heatAffected > 0;
+  const early = earlyProgress(day, ctx, nowMin);
+  const earlyDismissKey = early ? `early:${early.anchorBlockId}` : null;
+  const earlySuggestions = early && !(today.dismissed ?? []).includes(earlyDismissKey!) ? suggestForEarly(itin, ctx, { dayIndex, nowMin }) : [];
+  const showEarly = !!early && !(today.dismissed ?? []).includes(earlyDismissKey!);
+  const here = currentLocation(itin, ctx, dayIndex, nowMin);
+  const detourCandidates = detourOpen ? nearbyOpenSpots(itin, ctx, { dayIndex, nowMin }) : [];
+  const detourAfter = currentBlock(itin, dayIndex, nowMin);
 
   const action = getNextAction(day, ctx, nowMin);
   const fixedCountdown = nextFixedCountdown(day, ctx, nowMin, margin);
@@ -264,6 +320,19 @@ export default function TodayPage() {
             tone: "rain" as const,
             text: `☔ 雨の予報があります（屋外 ${rainAffected}件に影響）`,
             onClick: () => impact.switchable.length && propose({ type: "plan-b", blockIds: impact.switchable.map((b) => b.id), cause: "rain" }),
+          },
+        ]
+      : []),
+    ...(showHeatBanner
+      ? [
+          {
+            id: "heat",
+            tone: "heat" as const,
+            text: `🥵 暑さに注意（WBGT ${heatImpact.wbgt}・屋外 ${heatAffected}件に影響）`,
+            onClick: () => {
+              const e = heatEvent();
+              if (e) propose(e);
+            },
           },
         ]
       : []),
@@ -341,16 +410,30 @@ export default function TodayPage() {
         enabled={mode === "auto"}
         rainKey={showRainBanner ? rainKey : null}
         rainTarget={impact.switchable.length}
+        heatKey={showHeatBanner ? heatKey : null}
+        heatTarget={heatAffected}
         walkKey={showWalk && walkSuggest ? `walk:${walkSuggest.beforeBlockId}` : null}
         onRain={autoRain}
+        onHeat={autoHeat}
         onWalk={autoWalk}
       />
 
       <div className="mt-3" />
-      <NextActionCard action={action} nowMin={nowMin} fixed={fixedCountdown} memberDepartures={memberDepartures} />
+      <NextActionCard
+        action={action}
+        nowMin={nowMin}
+        fixed={fixedCountdown}
+        memberDepartures={memberDepartures}
+        onArrived={() => action.arrivable && recordProgress(action.arrivable.id, "arrived")}
+        onDeparted={() => action.departable && recordProgress(action.departable.id, "departed")}
+      />
 
       <Button variant="secondary" size="lg" className="mt-3 w-full border-amber-300 bg-amber-50 text-amber-950 hover:bg-amber-100" onClick={() => setTiredOpen(true)} data-testid="tired-button">
         😮‍💨 疲れた（休憩を入れる）
+      </Button>
+
+      <Button variant="secondary" size="lg" className="mt-2 w-full border-sky-300 bg-sky-50 text-sky-950 hover:bg-sky-100" onClick={() => setDetourOpen(true)} data-testid="detour-button">
+        📍 ここに寄る（寄り道）
       </Button>
 
       <div className="mt-3 space-y-3">
@@ -395,6 +478,20 @@ export default function TodayPage() {
                 : "切り替えが必要な屋外の予定はありません。"}
           </p>
         )}
+        {mode !== "manual" && showHeatBanner && today.heat && (
+          <HeatBanner
+            impact={heatImpact}
+            heat={today.heat}
+            ctx={ctx}
+            onSwitchAll={() => propose({ type: "plan-b", blockIds: heatImpact.switchable.map((b) => b.id), cause: "heat" })}
+            onRest={() => {
+              const ids = [...heatImpact.switchable, ...heatImpact.noPlanB].map((b) => b.id);
+              propose({ type: "heat-rest", blockIds: ids, minutes: HEAT_RULES.restMin });
+            }}
+            onDismiss={() => update((t) => (t.today ? { ...t, today: { ...t.today, heatDismissed: heatKey ?? undefined } } : t))}
+          />
+        )}
+        {showEarly && early && <EarlyCard early={early} suggestions={earlySuggestions} onApply={applyEarly} onDismiss={() => dismiss(earlyDismissKey!)} />}
         {mode !== "manual" && closedBlocks.map((b) => (
           <ClosureBanner
             key={b.id}
@@ -456,6 +553,18 @@ export default function TodayPage() {
         }}
       />
 
+      <DetourSheet
+        open={detourOpen}
+        onClose={() => setDetourOpen(false)}
+        here={here}
+        nowMin={nowMin}
+        candidates={detourCandidates}
+        onChoose={(stop: DetourStop) => {
+          setDetourOpen(false);
+          propose({ type: "detour", stop, afterBlockId: detourAfter?.id ?? null });
+        }}
+      />
+
       <TiredSheet
         open={tiredOpen}
         onClose={() => setTiredOpen(false)}
@@ -476,6 +585,12 @@ export default function TodayPage() {
           toast.show(`☔ ${formatHHMM(rain.startMin)}から降水確率${rain.prob}%の雨を想定しました`);
         }}
         onStopRain={() => update((t) => (t.today ? { ...t, today: { ...t.today, rain: undefined, rainDismissed: undefined } } : t))}
+        heat={today.heat}
+        onHeat={(heat: HeatOverride) => {
+          update((t) => (t.today ? { ...t, today: { ...t.today, heat, heatDismissed: undefined } } : t));
+          toast.show(`🥵 ${formatHHMM(heat.startMin)}から暑さ指数 ${heat.wbgt} を想定しました`);
+        }}
+        onStopHeat={() => update((t) => (t.today ? { ...t, today: { ...t.today, heat: undefined, heatDismissed: undefined } } : t))}
         onDelay={(m) => propose({ type: "delay", minutes: m })}
         closable={closable}
         ctx={ctx}

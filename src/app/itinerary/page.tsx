@@ -118,7 +118,7 @@ export default function ItineraryPage() {
     const result = replan(itinerary, event, ctx, { dayIndex: day.index, removeMustIds });
     const title = describeEvent(event, ctx, itinerary);
     const classification = classifyChange(result, ctx);
-    if (decideApply(mode, classification.weight) === "apply") {
+    if (decideApply(mode, classification.weight, event) === "apply") {
       commitPlan(result, title, classification.weight);
       return;
     }
