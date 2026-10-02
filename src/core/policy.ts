@@ -1,3 +1,4 @@
+import { itineraryChanged } from "./history";
 import type { ReplanResult } from "./replan";
 import { isInert } from "./schedule";
 import { BUDGET_COMFORT } from "./scoring";
@@ -41,8 +42,17 @@ export const LARGE_CHANGE_MIN_COUNT = 2;
 
 const isPlanBlock = (b: Block) => !isInert(b) && !b.fixed && b.label !== "buffer" && b.label !== "rest" && !!b.spotId;
 
+/**
+ * 何も変わらない結果（例: 現在時刻より前の固定時刻は追加しない）。確認の画面は出さず、notes の理由だけを知らせる。
+ * 削る候補（mustCandidates）があるときは、選んでもらう必要があるので、何も変わらなくても空振りとはみなさない。
+ */
+export function isNoOp(result: ReplanResult): boolean {
+  return !itineraryChanged(result.before, result.after) && result.mustCandidates.length === 0;
+}
+
 export function classifyChange(result: ReplanResult, ctx: PlanningContext): Classification {
   const reasons: string[] = [];
+  if (isNoOp(result)) return { weight: "light", reasons };
   const before = result.before.days[result.dayIndex];
   const after = result.after.days[result.dayIndex];
   const nameOf = (id?: string) => (id ? ctx.spotById.get(id)?.name : undefined) ?? "予定";

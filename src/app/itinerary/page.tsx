@@ -23,7 +23,7 @@ import {
 import { needsPlanB } from "@/core/planb";
 import { planBWarnings } from "@/core/planner";
 import { commitItinerary, commitResult, itineraryChanged, undoLast } from "@/core/history";
-import { classifyChange, decideApply, modeOf, type Classification } from "@/core/policy";
+import { classifyChange, decideApply, modeOf, isNoOp, type Classification } from "@/core/policy";
 import { describeEvent, replan, type ReplanEvent, type ReplanResult } from "@/core/replan";
 import { formatDateJa } from "@/core/time";
 import type { BlockLabel, Itinerary, Member, ResponseMode } from "@/core/types";
@@ -117,6 +117,11 @@ export default function ItineraryPage() {
   const propose = (event: ReplanEvent, removeMustIds: string[] = []) => {
     const result = replan(itinerary, event, ctx, { dayIndex: day.index, removeMustIds });
     const title = describeEvent(event, ctx, itinerary);
+    if (isNoOp(result)) {
+      // 旅程が何も変わらない（追加しない理由などは notes にある）。空の確認画面は出さない
+      toast.show(result.notes[0] ?? "旅程への影響はありませんでした");
+      return;
+    }
     const classification = classifyChange(result, ctx);
     if (decideApply(mode, classification.weight, event) === "apply") {
       commitPlan(result, title, classification.weight);

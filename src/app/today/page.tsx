@@ -22,7 +22,7 @@ import { suggestReplacement } from "@/core/actions";
 import { currentBlock, currentLocation, nearbyOpenSpots } from "@/core/detour";
 import { absenceByBlock, departureNotices, memberFixedStatuses, nextFixedCountdown } from "@/core/fixed";
 import { commitResult, itineraryChanged, undoLast } from "@/core/history";
-import { canAutoApply, classifyChange, decideApply, modeOf, type ChangeWeight, type Classification } from "@/core/policy";
+import { canAutoApply, classifyChange, decideApply, modeOf, isNoOp, type ChangeWeight, type Classification } from "@/core/policy";
 import { describeEvent, replan, type ReplanEvent, type ReplanResult } from "@/core/replan";
 import { earlyProgress, suggestForEarly, type Suggestion } from "@/core/suggest";
 import { formatDateJa, formatHHMM } from "@/core/time";
@@ -178,6 +178,11 @@ export default function TodayPage() {
   const propose = (event: ReplanEvent, removeMustIds: string[] = []) => {
     const result = replan(today.itinerary, event, ctx, { dayIndex: today.dayIndex, nowMin: today.nowMin, removeMustIds });
     const title = describeEvent(event, ctx, today.itinerary);
+    if (isNoOp(result)) {
+      // 旅程が何も変わらない（追加しない理由などは notes にある）。空の確認画面は出さない
+      toast.show(result.notes[0] ?? "旅程への影響はありませんでした");
+      return;
+    }
     const classification = classifyChange(result, ctx);
     if (decideApply(mode, classification.weight, event) === "apply") {
       commit(result, title, { weight: classification.weight });

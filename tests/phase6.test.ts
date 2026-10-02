@@ -159,3 +159,43 @@ describe("フェーズ6: EventParser（言葉 → 再計画のイベント。キ
     expect(typeof templateWriter.explain).toBe("function");
   });
 });
+
+/** 作業のチェックで見つけた4件の修正（回帰テスト） */
+describe("フェーズ6のあと: チェックで見つけた不具合の修正", () => {
+  it("食事制限で外れた行きたい店は、営業時間ではなく食事制限が理由だと警告する", () => {
+    const itin = generateItinerary({ prefs: { ...demoPrefs, dietary: ["no-pork"], mustSpotIds: ["tenjin-ippudo"] }, ctx, startDate: SATURDAY });
+    const w = itin.days[0].warnings.join("\n");
+    expect(w).toContain("「博多 一風堂 大名本店」は、食事制限（豚肉なし）に対応できないため");
+    expect(w).not.toContain("「博多 一風堂 大名本店」を時間内に組み込めませんでした");
+  });
+
+  it("何も変わらない結果（過去の時刻の固定時刻）は、空振り（isNoOp）として扱い、重い変更にしない", async () => {
+    const { classifyChange, isNoOp } = await import("@/core/policy");
+    const itin = generateItinerary({ prefs: demoPrefs, ctx, startDate: SATURDAY });
+    const r = replan(itin, { type: "fixed-add", fixed: fixedEvent(10 * 60) }, ctx, { dayIndex: 0, nowMin: 17 * 60 });
+    expect(isNoOp(r)).toBe(true);
+    expect(classifyChange(r, ctx).weight).toBe("light");
+    // 実際に変わる固定時刻の追加は、これまでどおり重い変更
+    const real = replan(itin, { type: "fixed-add", fixed: fixedEvent(19 * 60) }, ctx, { dayIndex: 0 });
+    expect(isNoOp(real)).toBe(false);
+    expect(classifyChange(real, ctx).weight).toBe("heavy");
+  });
+
+  it("同じ名前のスポットが複数あるときは、文中のエリア名、なければいまいる場所に近いほうを選ぶ", () => {
+    expect(findSpotMention("太宰府のスタバに寄りたい", ctx)).toBe("dazaifu-starbucks");
+    expect(findSpotMention("大濠公園のスタバに寄りたい", ctx)).toBe("ohori-starbucks");
+    const dazaifu = ctx.spotById.get("dazaifu-shrine")!;
+    expect(findSpotMention("スタバに寄りたい", ctx, dazaifu)).toBe("dazaifu-starbucks");
+  });
+
+  it("「ラーメン」のような一般的な言葉は、特定の店に決め打ちせず、自由入力の寄り道にする", () => {
+    expect(findSpotMention("ラーメン屋に寄りたい", ctx)).toBeUndefined();
+    expect(ok("ラーメン屋に寄りたい")[0].event).toMatchObject({ type: "detour", stop: { name: "ラーメン屋" } });
+  });
+
+  it("「雨が止まって」は、遅れにも雨にも読まない。乗り物が止まったときだけ遅れと読む", () => {
+    const r = parseWithKeywords("雨が止まって電車が動いた", parseCtx());
+    expect(r.ok).toBe(false);
+    expect(ok("電車が止まってる")[0].event).toEqual({ type: "delay", minutes: 15 });
+  });
+});

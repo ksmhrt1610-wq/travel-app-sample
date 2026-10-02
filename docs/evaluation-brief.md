@@ -47,8 +47,8 @@
 - 対象: 福岡市内（天神・博多・中洲・大濠公園・百道浜・太宰府）、国内旅行をする大学生・20代の友人グループ。スマホ表示前提。
 - 制約: API キー不要（外部データは adapter 層でモック）、データ保存は localStorage、サーバー・DBなし、**LLM 不使用**（旅程生成・再計画・集約はすべてルールベース。LLM に差し替えられる境界は interface だけ用意し、呼んでいない）。
 - 技術: Next.js 16（App Router）/ React 19 / TypeScript 5.9 / Tailwind 4 / Vitest 5 / zod 4 / fast-check / dnd-kit / playwright-core（E2Eスクリプトのみ）。
-- 規模: `src/core` 6,508行（純粋ロジック）、`src/components` 4,334行、`src/app` 1,341行、`tests` 3,542行（**276テスト**。うちプロパティテスト18件）、`scripts/e2e-demo.mjs` 921行（**188チェック**）。
-- 起動: `npm install && npm run dev` → http://localhost:3000（スマホ幅で見る）。`npm test`（276件）、`npm run demo:e2e`（ブラウザでデモを自動確認）。
+- 規模: `src/core` 6,508行（純粋ロジック）、`src/components` 4,334行、`src/app` 1,341行、`tests` 3,542行（**281テスト**。うちプロパティテスト18件）、`scripts/e2e-demo.mjs` 921行（**188チェック**）。
+- 起動: `npm install && npm run dev` → http://localhost:3000（スマホ幅で見る）。`npm test`（281件）、`npm run demo:e2e`（ブラウザでデモを自動確認）。
 - 画面: `/` 入力、`/itinerary` 旅程、`/today` 当日モード、`/group` グループ、`/share?s=…` 共有（閲覧専用）、`/debug/crash`（Error Boundary の確認用）。
 
 ### スポットデータ（サンプル）
@@ -356,7 +356,7 @@ interface MemberInput { memberId; availableDates; budgetCapYen; dietary; rainTol
 
 ## 6. テストと検証
 
-- **276件のユニットテスト（Vitest、すべて合格）**: fixed 19／today 23／planner 17／tired 18／replan 15／recompute 14／planb 7／share 4／geo 3／phase1 22／phase2 23／phase3 26／phase4 13／phase5 38／phase6 13／properties 18。
+- **281件のユニットテスト（Vitest、すべて合格）**: fixed 19／today 23／planner 17／tired 18／replan 15／recompute 14／planb 7／share 4／geo 3／phase1 22／phase2 23／phase3 26／phase4 13／phase5 38／phase6 18／sample 2／properties 18。
   - 生成: 営業時間外・定休日のスポットが入らない、食事が食事の窓に収まる・1日に各食事1回、食事制限が必ず守られる、Mustの店は食事の枠で使う、歩行距離の目安、決定性。
   - 再計画: 優先順位と削減順序、食事は確認なしに削らない、Mustは確認なしに削除されない、提案は元の旅程を変えない、軽い/重いの分類、3モードの扱い、元に戻す、理由（Cause）、実績・寄り道・暑さ・早く進んだ提案。
   - 堅牢性: 壊れた共有リンク（文字列の時刻・巨大な配列・存在しないスポット・深いネスト・8KB超）、保存データの版管理と確認、保存前の検証。
@@ -430,7 +430,7 @@ interface MemberInput { memberId; availableDates; budgetCapYen; dietary; rainTol
 ```bash
 git clone -b claude/quirky-brown-vbcvo2 https://github.com/ksmhrt1610-wq/travel-app-sample.git
 cd travel-app-sample && npm install
-npm test                 # 276件（プロパティテストを含む）。FC_RUNS=500 npm test で試行回数を増やす
+npm test                 # 281件（プロパティテストを含む）。FC_RUNS=500 npm test で試行回数を増やす
 npm run dev              # http://localhost:3000（スマホ幅）
 npm run demo:e2e         # 別ターミナル。Chromiumが必要（188チェック）
 ```

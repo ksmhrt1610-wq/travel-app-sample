@@ -453,7 +453,11 @@ function planDay(
   for (const s of dayMusts) {
     if (!used.has(s.id)) {
       missingMusts++;
-      warnings.push(`「${s.name}」を時間内に組み込めませんでした（営業時間・移動時間の都合）。`);
+      warnings.push(
+        s.mealSlots?.length && !dietOk(s, prefs.dietary)
+          ? `「${s.name}」は、食事制限${dietNote.replace("に対応できる店", "")}に対応できないため、入れられませんでした。`
+          : `「${s.name}」を時間内に組み込めませんでした（営業時間・移動時間の都合）。`,
+      );
     }
   }
 
