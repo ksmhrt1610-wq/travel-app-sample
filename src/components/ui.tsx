@@ -49,6 +49,8 @@ export function Chip({ children, className }: { children: ReactNode; className?:
 }
 
 export const LABEL_STYLE: Record<BlockLabel, { chip: string; dot: string; card: string }> = {
+  fixed: { chip: "bg-slate-800 text-white", dot: "bg-slate-800", card: "border-slate-700 bg-slate-100" },
+  rest: { chip: "bg-amber-100 text-amber-800", dot: "bg-amber-400", card: "border-amber-300 bg-amber-50/70" },
   must: { chip: "bg-rose-100 text-rose-700", dot: "bg-rose-500", card: "border-rose-200 bg-white" },
   normal: { chip: "bg-sky-100 text-sky-700", dot: "bg-sky-500", card: "border-slate-200 bg-white" },
   optional: { chip: "bg-violet-100 text-violet-700", dot: "bg-violet-400", card: "border-violet-200 bg-white" },

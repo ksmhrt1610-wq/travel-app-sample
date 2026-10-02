@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { applyDelay, reorderBlocks, skipAllCandidates } from "@/core/actions";
-import { MIN_BUFFER_MIN, recomputeDay, settleDay } from "@/core/schedule";
+import { reorderBlocks } from "@/core/actions";
+import { replan } from "@/core/replan";
+import { MIN_BUFFER_MIN, recomputeDay } from "@/core/schedule";
 import { hm, makeCtx, makeDay, wrapItinerary } from "./helpers";
 
 const ctx = makeCtx();
@@ -16,6 +17,9 @@ function sampleDay() {
   ]);
 }
 
+const delayed = (day: ReturnType<typeof sampleDay>, delayMin: number, nowMin: number) =>
+  recomputeDay(day, ctx, { mode: "preserve", nowMin, delayMin });
+
 describe("時刻の再計算", () => {
   it("変更がなければ時刻は変わらない（再計算は冪等）", () => {
     const day = sampleDay();
@@ -26,9 +30,7 @@ describe("時刻の再計算", () => {
   });
 
   it("小さな遅延は余白ブロックが吸収し、後ろの予定は動かない", () => {
-    const day = sampleDay();
-    const out = settleDay(day, ctx, { mode: "preserve", nowMin: hm(10, 30), delayMin: 20 });
-    const [a, buf, b, c] = out.blocks;
+    const [a, buf, b, c] = delayed(sampleDay(), 20, hm(10, 30)).blocks;
     expect(a.startMin).toBe(hm(10)); // 進行中のブロックは固定
     expect(buf.startMin).toBe(hm(11, 20));
     expect(buf.endMin).toBe(hm(11, 30)); // 30分 → 10分に縮む
@@ -38,9 +40,7 @@ describe("時刻の再計算", () => {
   });
 
   it("大きな遅延は余白で吸収しきれず、後ろの予定が押し出される（移動時間も加味）", () => {
-    const day = sampleDay();
-    const out = settleDay(day, ctx, { mode: "preserve", nowMin: hm(10, 30), delayMin: 60 });
-    const [, buf, b, c] = out.blocks;
+    const [, buf, b, c] = delayed(sampleDay(), 60, hm(10, 30)).blocks;
     expect(buf.startMin).toBe(hm(12)); // 11:00 + 60分
     expect(buf.endMin).toBe(hm(12, 10)); // 最短 10 分まで縮む
     const bStart = hm(12, 10) + travel("ohori-park", "ohori-starbucks");
@@ -52,81 +52,73 @@ describe("時刻の再計算", () => {
   });
 
   it("遅延は累積し、後続ブロックは必ず『前の終了＋移動時間』以降に始まる", () => {
-    let itin = wrapItinerary(sampleDay());
-    itin = applyDelay(itin, 0, 30, hm(10, 30), ctx);
-    itin = applyDelay(itin, 0, 30, hm(10, 30), ctx);
-    const blocks = itin.days[0].blocks;
-    for (let i = 1; i < blocks.length; i++) {
-      const prev = blocks[i - 1];
-      expect(blocks[i].startMin).toBeGreaterThanOrEqual(prev.endMin + blocks[i].travelMin);
+    const once = delayed(delayed(sampleDay(), 30, hm(10, 30)), 30, hm(10, 30));
+    for (let i = 1; i < once.blocks.length; i++) {
+      expect(once.blocks[i].startMin).toBeGreaterThanOrEqual(once.blocks[i - 1].endMin + once.blocks[i].travelMin);
     }
     // 合計60分の遅延と同じ結果になる
-    const once = applyDelay(wrapItinerary(sampleDay()), 0, 60, hm(10, 30), ctx).days[0].blocks;
-    expect(blocks.map((b) => b.startMin)).toEqual(once.map((b) => b.startMin));
+    const sixty = delayed(sampleDay(), 60, hm(10, 30));
+    expect(once.blocks.map((b) => b.startMin)).toEqual(sixty.blocks.map((b) => b.startMin));
   });
 
   it("開始済みのブロックは、遅延が発生しても動かない", () => {
-    const itin = applyDelay(wrapItinerary(sampleDay()), 0, 45, hm(11, 45), ctx);
-    const [a, buf, b] = itin.days[0].blocks;
+    const [a, buf, b] = delayed(sampleDay(), 45, hm(11, 45)).blocks;
     expect([a.startMin, a.endMin]).toEqual([hm(10), hm(11)]);
     expect([buf.startMin, buf.endMin]).toEqual([hm(11), hm(11, 30)]);
     expect([b.startMin, b.endMin]).toEqual([hm(11, 40), hm(12, 25)]); // 進行中（11:45時点）なので固定
   });
 
-  it("遅延で営業時間に間に合わなくなる Optional は『スキップ候補』になる", () => {
-    const out = applyDelay(wrapItinerary(sampleDay()), 0, 300, hm(10, 30), ctx).days[0].blocks;
-    const c = out[3];
+  it("遅延で営業時間に間に合わなくなると issues に記録される", () => {
+    const [, , , c] = delayed(sampleDay(), 300, hm(10, 30)).blocks;
     expect(c.issues).toContain("outside-hours"); // 福岡市美術館は 17:30 閉館
-    expect(c.skip).toBe("candidate");
-    expect(out[2].skip).toBeUndefined(); // 営業中の標準ブロックは候補にならない
-  });
-
-  it("営業時間内に収まる Optional は、遅延しても候補にならない", () => {
-    const out = applyDelay(wrapItinerary(sampleDay()), 0, 60, hm(10, 30), ctx).days[0].blocks;
-    expect(out[3].skip).toBeUndefined();
-    expect(out[3].issues).toBeUndefined();
-  });
-
-  it("手前の Optional を飛ばせば間に合う場合、Optional をスキップ候補にして、スキップで立て直せる", () => {
-    const day = makeDay([
-      { id: "opt", label: "optional", spotId: "ohori-tsutaya", start: hm(14), end: hm(15) },
-      { id: "norm", spotId: "ohori-art", start: hm(15, 20), end: hm(16, 50) }, // 17:30 閉館
-    ]);
-    const delayed = applyDelay(wrapItinerary(day), 0, 60, hm(13), ctx).days[0].blocks;
-    expect(delayed[1].issues).toContain("outside-hours"); // 手前が遅れて美術館が間に合わない
-    expect(delayed[0].skip).toBe("candidate");
-
-    const skipped = skipAllCandidates(applyDelay(wrapItinerary(day), 0, 60, hm(13), ctx), 0, hm(13), ctx).days[0].blocks;
-    expect(skipped[0].skip).toBe("skipped");
-    expect(skipped[1].issues).toBeUndefined();
-    expect(skipped[1].startMin).toBeLessThanOrEqual(hm(15, 40));
-  });
-
-  it("標準ブロックが終了予定時刻を大きく超えるときも、手前の Optional をスキップ候補にして改善できる", () => {
-    const day = makeDay([
-      { id: "opt", label: "optional", spotId: "ohori-tsutaya", start: hm(16), end: hm(17) },
-      { id: "dinner", spotId: "tenjin-ippudo", start: hm(18, 30), end: hm(19, 15) },
-    ]);
-    // 終了予定は 20:00。180分の遅れで夕食は 20:30 を大きく過ぎる
-    const delayed = applyDelay(wrapItinerary(day), 0, 180, hm(15), ctx).days[0].blocks;
-    expect(delayed[1].endMin).toBeGreaterThan(hm(20, 30));
-    expect(delayed[0].skip).toBe("candidate");
-    const skipped = skipAllCandidates(applyDelay(wrapItinerary(day), 0, 180, hm(15), ctx), 0, hm(15), ctx).days[0].blocks;
-    expect(skipped[1].endMin).toBeLessThan(delayed[1].endMin);
-  });
-
-  it("営業時間外のブロックは issues に記録される（閉店後に到着）", () => {
-    const out = settleDay(
-      makeDay([{ id: "x", spotId: "ohori-art", start: hm(16), end: hm(17, 30) }]),
-      ctx,
-      { mode: "preserve", nowMin: hm(9), delayMin: 90 },
-    );
-    expect(out.blocks[0].issues).toContain("outside-hours");
+    const ok = delayed(sampleDay(), 60, hm(10, 30)).blocks[3];
+    expect(ok.issues).toBeUndefined();
   });
 
   it("開店前に着く場合は開店まで待つ", () => {
     const day = makeDay([{ id: "x", spotId: "ohori-art", start: hm(9, 40), end: hm(11, 10) }]);
     expect(day.blocks[0].startMin).toBeGreaterThanOrEqual(hm(9, 30));
+  });
+});
+
+describe("遅延で間に合わなくなったとき（再計画エンジン）", () => {
+  it("営業時間に間に合わなくなる Optional は、確認用の提案の中で削除される", () => {
+    const r = replan(wrapItinerary(sampleDay()), { type: "delay", minutes: 300 }, ctx, { dayIndex: 0, nowMin: hm(10, 30) });
+    const c = r.after.days[0].blocks[3];
+    expect(c.skip).toBe("skipped");
+    expect(r.steps.filter((s) => s.phase === "reduce").map((s) => s.kind)).toEqual(["drop-optional"]);
+    expect(r.feasible).toBe(true);
+    // 元の旅程は変わらない（確定するまで反映されない）
+    expect(r.before.days[0].blocks[3].skip).toBeUndefined();
+  });
+
+  it("営業時間内に収まるなら、遅延しても何も削らない", () => {
+    const r = replan(wrapItinerary(sampleDay()), { type: "delay", minutes: 60 }, ctx, { dayIndex: 0, nowMin: hm(10, 30) });
+    expect(r.steps.filter((s) => s.phase === "reduce")).toHaveLength(0);
+    expect(r.after.days[0].blocks[3].skip).toBeUndefined();
+  });
+
+  it("手前の Optional を削れば後ろの標準が間に合う場合、その Optional を削る（営業時間）", () => {
+    const day = makeDay([
+      { id: "opt", label: "optional", spotId: "ohori-tsutaya", start: hm(14), end: hm(15) },
+      { id: "norm", spotId: "ohori-art", start: hm(15, 20), end: hm(16, 50) }, // 17:30 閉館
+    ]);
+    const r = replan(wrapItinerary(day), { type: "delay", minutes: 60 }, ctx, { dayIndex: 0, nowMin: hm(13) });
+    const [opt, norm] = r.after.days[0].blocks;
+    expect(opt.skip).toBe("skipped");
+    expect(norm.issues).toBeUndefined();
+    expect(norm.startMin).toBeLessThanOrEqual(hm(15, 40));
+  });
+
+  it("標準ブロックが終了予定時刻を大きく超えるときも、手前の Optional を削って改善できる", () => {
+    const day = makeDay([
+      { id: "opt", label: "optional", spotId: "ohori-tsutaya", start: hm(16), end: hm(17) },
+      { id: "dinner", spotId: "tenjin-ippudo", start: hm(18, 30), end: hm(19, 15) },
+    ]);
+    const r = replan(wrapItinerary(day), { type: "delay", minutes: 180 }, ctx, { dayIndex: 0, nowMin: hm(15) });
+    expect(r.after.days[0].blocks[0].skip).toBe("skipped");
+    const withoutDrop = recomputeDay(wrapItinerary(day).days[0], ctx, { mode: "preserve", nowMin: hm(15), delayMin: 180 });
+    expect(r.after.days[0].blocks[1].endMin).toBeLessThan(withoutDrop.blocks[1].endMin);
   });
 });
 
@@ -139,7 +131,6 @@ describe("並べ替え", () => {
     for (let i = 1; i < out.length; i++) {
       expect(out[i].startMin).toBeGreaterThanOrEqual(out[i - 1].endMin + out[i].travelMin);
     }
-    // 計画上の時刻も更新される
     expect(out.every((b) => b.plannedStartMin === b.startMin)).toBe(true);
   });
 

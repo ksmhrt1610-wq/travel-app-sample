@@ -1,6 +1,9 @@
+import { createFixedBlock, defaultMembers } from "./fixed";
+import { withWalkLimit } from "./geo";
 import { haversineM } from "./geo";
 import { describePlanBReason } from "./planb";
 import { DAY_ORIGINS } from "./planner";
+import { DEFAULT_MARGIN_MIN } from "./schedule";
 import type {
   Block,
   BlockLabel,
@@ -8,6 +11,8 @@ import type {
   Companions,
   Day,
   Duration,
+  FixedEvent,
+  FixedKind,
   InterestCategory,
   Itinerary,
   LatLng,
@@ -21,23 +26,27 @@ import type {
  * 旅程の共有。状態をコンパクトな配列にして JSON → UTF-8 → base64url にし、URL のクエリに載せる。
  * 受け取った側はサーバーなしで同じ旅程を再現できる（閲覧専用）。
  * スポットは id だけを載せ、名前や座標は受け取り側の SpotProvider から引く。
+ * 固定時刻（駅などスポットでない場所を含む）とメンバーは、その内容をそのまま載せる。
  */
 
-const VERSION = 1;
+const VERSION = 2;
 
-const LABEL_CODE: Record<BlockLabel, string> = { must: "m", normal: "n", optional: "o", buffer: "b" };
-const CODE_LABEL: Record<string, BlockLabel> = { m: "must", n: "normal", o: "optional", b: "buffer" };
+const LABEL_CODE: Record<BlockLabel, string> = { fixed: "f", must: "m", normal: "n", optional: "o", buffer: "b", rest: "r" };
+const CODE_LABEL: Record<string, BlockLabel> = { f: "fixed", m: "must", n: "normal", o: "optional", b: "buffer", r: "rest" };
 
-const FLAG = { switched: 1, skipped: 2, candidate: 4, closed: 8, keep: 16 } as const;
+const FLAG = { switched: 1, skipped: 2, closed: 8 } as const;
 
-type BlockTuple = [string, string, number, number, number, string, number, number];
-type DayTuple = [number, number, number, BlockTuple[], string[]];
+type FixedTuple = [string, FixedKind, string, number, number, string, number, number, string, number, number, string[] | null];
+type BlockTuple = [string, string, number, number, number, string, number, number, FixedTuple?];
+type DayTuple = [number, number, number, BlockTuple[], string[], FixedTuple[], number];
 type Payload = [
   number, // version
   string, // startDate
   [Duration, Companions, Budget, InterestCategory[], Pace, RainTolerance, string[]],
   string[], // closedSpotIds
   DayTuple[],
+  [string, string][], // members
+  number, // marginMin
 ];
 
 /* ---------- base64url ---------- */
@@ -58,6 +67,21 @@ function fromBase64Url(token: string): string {
 
 /* ---------- encode ---------- */
 
+const fixedToTuple = (f: FixedEvent): FixedTuple => [
+  f.id,
+  f.kind,
+  f.title,
+  f.timeMin,
+  f.dayIndex,
+  f.place.name,
+  f.place.lat,
+  f.place.lng,
+  f.spotId ?? "",
+  f.durationMin,
+  f.endsDay ? 1 : 0,
+  f.memberIds,
+];
+
 export function encodeItinerary(itin: Itinerary): string {
   const p = itin.prefs;
   const payload: Payload = [
@@ -70,13 +94,8 @@ export function encodeItinerary(itin: Itinerary): string {
       d.endMin,
       Math.max(0, DAY_ORIGINS.findIndex((o) => o.name === d.origin.name)),
       d.blocks.map((b): BlockTuple => {
-        const flags =
-          (b.switched ? FLAG.switched : 0) |
-          (b.skip === "skipped" ? FLAG.skipped : 0) |
-          (b.skip === "candidate" ? FLAG.candidate : 0) |
-          (b.closed ? FLAG.closed : 0) |
-          (b.keepAnyway ? FLAG.keep : 0);
-        return [
+        const flags = (b.switched ? FLAG.switched : 0) | (b.skip === "skipped" ? FLAG.skipped : 0) | (b.closed ? FLAG.closed : 0);
+        const tuple: BlockTuple = [
           LABEL_CODE[b.label],
           b.spotId ?? "",
           b.startMin,
@@ -86,9 +105,15 @@ export function encodeItinerary(itin: Itinerary): string {
           b.planB?.durationMin ?? 0,
           flags,
         ];
+        if (b.fixed) tuple.push(fixedToTuple(b.fixed));
+        return tuple;
       }),
       d.warnings,
+      (d.memberFixed ?? []).map(fixedToTuple),
+      d.lowWalking ? 1 : 0,
     ]),
+    itin.members.map((m) => [m.id, m.name]),
+    itin.settings.marginMin,
   ];
   return toBase64Url(JSON.stringify(payload));
 }
@@ -103,12 +128,29 @@ export function buildShareUrl(origin: string, itin: Itinerary, path = "/share"):
 const isNum = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
 const isStr = (x: unknown): x is string => typeof x === "string";
 
+function tupleToFixed(t: FixedTuple): FixedEvent | null {
+  const [id, kind, title, timeMin, dayIndex, placeName, lat, lng, spotId, durationMin, endsDay, memberIds] = t;
+  if (!isStr(id) || !isStr(kind) || !isStr(title) || !isNum(timeMin) || !isNum(dayIndex) || !isStr(placeName) || !isNum(lat) || !isNum(lng) || !isNum(durationMin)) return null;
+  return {
+    id,
+    kind,
+    title,
+    timeMin,
+    dayIndex,
+    place: { name: placeName, lat, lng },
+    spotId: spotId || undefined,
+    durationMin,
+    endsDay: !!endsDay,
+    memberIds: Array.isArray(memberIds) ? memberIds.filter(isStr) : null,
+  };
+}
+
 /** 不正なトークン・存在しないスポットを含む場合は null */
 export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary | null {
   try {
     const payload = JSON.parse(fromBase64Url(token)) as Payload;
-    if (!Array.isArray(payload) || payload[0] !== VERSION) return null;
-    const [, startDate, pref, closedSpotIds, dayTuples] = payload;
+    if (!Array.isArray(payload) || (payload[0] !== 1 && payload[0] !== VERSION)) return null;
+    const [, startDate, pref, closedSpotIds, dayTuples, memberTuples, marginMin] = payload;
     if (!isStr(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return null;
     if (!Array.isArray(pref) || !Array.isArray(dayTuples) || dayTuples.length === 0 || dayTuples.length > 7) return null;
 
@@ -124,24 +166,37 @@ export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary 
 
     const days: Day[] = [];
     for (let i = 0; i < dayTuples.length; i++) {
-      const [startMin, endMin, originIdx, blockTuples, warnings] = dayTuples[i];
+      const [startMin, endMin, originIdx, blockTuples, warnings, memberFixedTuples, lowWalking] = dayTuples[i];
       if (!isNum(startMin) || !isNum(endMin) || !Array.isArray(blockTuples)) return null;
       const origin = DAY_ORIGINS[originIdx] ?? DAY_ORIGINS[0];
+      const travelFn = lowWalking ? withWalkLimit(ctx.travel) : ctx.travel;
 
       let loc: LatLng = origin;
       const blocks: Block[] = [];
       for (let j = 0; j < blockTuples.length; j++) {
-        const [code, spotId, start, end, duration, planBId, planBDuration, flags] = blockTuples[j];
+        const [code, spotId, start, end, duration, planBId, planBDuration, flags, fixedTuple] = blockTuples[j];
         const label = CODE_LABEL[code];
         if (!label || !isNum(start) || !isNum(end) || !isNum(duration) || !isNum(flags)) return null;
+        const id = `d${i + 1}b${j + 1}`;
 
-        const spot = spotId ? ctx.spotById.get(spotId) : undefined;
-        if (label === "buffer") {
-          blocks.push({ id: `d${i + 1}b${j + 1}`, label, durationMin: duration, startMin: start, endMin: end, plannedStartMin: start, plannedEndMin: end, travelMin: 0, travelMode: "none" });
+        if (label === "fixed") {
+          const ev = fixedTuple ? tupleToFixed(fixedTuple) : null;
+          if (!ev) return null;
+          const block = createFixedBlock({ ...ev, memberIds: null });
+          const travel = travelFn(loc, ev.place);
+          loc = ev.place;
+          blocks.push({ ...block, id: ev.id, startMin: start, endMin: end, plannedStartMin: start, plannedEndMin: end, travelMin: travel.minutes, travelMode: travel.mode, travelDistanceM: travel.distanceM });
           continue;
         }
-        if (!spot) return null;
-        const travel = ctx.travel(loc, spot);
+
+        const spot = spotId ? ctx.spotById.get(spotId) : undefined;
+        if (!spot) {
+          // 余白、または場所を決めない休憩
+          if (label !== "buffer" && label !== "rest") return null;
+          blocks.push({ id, label, durationMin: duration, startMin: start, endMin: end, plannedStartMin: start, plannedEndMin: end, travelMin: 0, travelMode: "none" });
+          continue;
+        }
+        const travel = travelFn(loc, spot);
         loc = spot;
 
         let planB: Block["planB"] = undefined;
@@ -155,12 +210,12 @@ export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary 
             distanceM: Math.round(haversineM(spot, alt)),
             durationMin: planBDuration,
           };
-        } else if (spot.setting !== "indoor") {
+        } else if (spot.setting !== "indoor" && label !== "rest") {
           planB = null;
         }
 
         blocks.push({
-          id: `d${i + 1}b${j + 1}`,
+          id,
           label,
           spotId: spot.id,
           durationMin: duration,
@@ -170,14 +225,17 @@ export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary 
           plannedEndMin: end,
           travelMin: travel.minutes,
           travelMode: travel.mode,
+          travelDistanceM: travel.distanceM,
           planB,
           switched: !!(flags & FLAG.switched) || undefined,
-          skip: flags & FLAG.skipped ? "skipped" : flags & FLAG.candidate ? "candidate" : undefined,
+          skip: flags & FLAG.skipped ? "skipped" : undefined,
           closed: !!(flags & FLAG.closed) || undefined,
-          keepAnyway: !!(flags & FLAG.keep) || undefined,
         });
       }
 
+      const memberFixed = (Array.isArray(memberFixedTuples) ? memberFixedTuples : [])
+        .map(tupleToFixed)
+        .filter((f): f is FixedEvent => !!f);
       days.push({
         index: i,
         date: addDaysLocal(startDate, i),
@@ -186,8 +244,15 @@ export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary 
         origin,
         blocks,
         warnings: Array.isArray(warnings) ? warnings.filter(isStr) : [],
+        memberFixed: memberFixed.length ? memberFixed : undefined,
+        lowWalking: lowWalking ? true : undefined,
       });
     }
+
+    const members =
+      Array.isArray(memberTuples) && memberTuples.length
+        ? memberTuples.filter((m) => Array.isArray(m) && isStr(m[0]) && isStr(m[1])).map(([id, name]) => ({ id, name }))
+        : defaultMembers(prefs.companions);
 
     return {
       version: 1,
@@ -197,6 +262,8 @@ export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary 
       prefs,
       days,
       closedSpotIds: Array.isArray(closedSpotIds) ? closedSpotIds.filter(isStr) : [],
+      members,
+      settings: { marginMin: isNum(marginMin) ? marginMin : DEFAULT_MARGIN_MIN },
     };
   } catch {
     return null;

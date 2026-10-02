@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyDelay, switchBlock } from "@/core/actions";
+import { replan } from "@/core/replan";
 import { generateItinerary } from "@/core/planner";
 import { buildShareUrl, decodeItinerary, encodeItinerary } from "@/core/share";
 import { demoPrefs, hm, makeCtx, SATURDAY } from "./helpers";
@@ -26,8 +26,8 @@ describe("共有URL", () => {
   it("1泊2日・Plan B 切替済み・遅延後の状態も再現できる", () => {
     let itin = generateItinerary({ prefs: { ...demoPrefs, duration: "overnight", mustSpotIds: ["dazaifu-shrine"] }, ctx, startDate: SATURDAY });
     const target = itin.days[0].blocks.find((b) => b.planB);
-    if (target) itin = switchBlock(itin, target.id, ctx);
-    itin = applyDelay(itin, 0, 40, hm(9, 30), ctx);
+    if (target) itin = replan(itin, { type: "plan-b", blockIds: [target.id] }, ctx, { dayIndex: 0 }).after;
+    itin = replan(itin, { type: "delay", minutes: 40 }, ctx, { dayIndex: 0, nowMin: hm(9, 30) }).after;
     const decoded = decodeItinerary(encodeItinerary(itin), ctx)!;
     expect(decoded.days).toHaveLength(2);
     expect(decoded.days[0].blocks.map((b) => [b.spotId, b.startMin, b.switched ?? false, b.skip ?? null])).toEqual(

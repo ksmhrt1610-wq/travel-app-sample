@@ -121,7 +121,7 @@ export function toPlanB(c: PlanBCandidate): PlanB {
 
 /** Plan B が必要なブロックか（屋外・半屋外の予定） */
 export function needsPlanB(block: Block, ctx: PlanningContext): boolean {
-  if (block.label === "buffer" || !block.spotId) return false;
+  if (block.label === "buffer" || block.label === "fixed" || block.label === "rest" || !block.spotId) return false;
   const spot = ctx.spotById.get(block.spotId);
   return !!spot && spot.setting !== "indoor";
 }
@@ -158,7 +158,8 @@ export function attachPlanBs(itin: Itinerary, ctx: PlanningContext, opts: Attach
   const days = itin.days.map((day) => ({
     ...day,
     blocks: day.blocks.map((block): Block => {
-      if (!needsPlanB(block, ctx) && !block.switched) return block.label === "buffer" ? block : { ...block, planB: undefined };
+      if (block.label === "buffer" || block.label === "fixed" || block.label === "rest") return block;
+      if (!needsPlanB(block, ctx) && !block.switched) return { ...block, planB: undefined };
       if (block.switched) return block;
       const started =
         opts.nowMin !== undefined && (opts.dayIndex === undefined || opts.dayIndex === day.index) && block.startMin <= opts.nowMin;

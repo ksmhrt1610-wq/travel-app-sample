@@ -1,17 +1,8 @@
 import { describe, expect, it } from "vitest";
-import {
-  applyDelay,
-  keepBlock,
-  locateBlock,
-  markSpotClosed,
-  replaceBlockSpot,
-  skipBlocks,
-  suggestReplacement,
-  switchBlock,
-  switchBlocks,
-} from "@/core/actions";
+import { locateBlock, suggestReplacement } from "@/core/actions";
 import { diffItineraries, summarizeDiff } from "@/core/diff";
 import { generateItinerary } from "@/core/planner";
+import { replan, type ReplanEvent } from "@/core/replan";
 import { getNextAction } from "@/core/today";
 import { detectRainImpact, type HourlyWeather } from "@/core/weather";
 import type { Itinerary } from "@/core/types";
@@ -21,6 +12,9 @@ const ctx = makeCtx();
 const sunny: HourlyWeather[] = Array.from({ length: 24 }, (_, hour) => ({ hour, precipProb: 10 }));
 const demo = (): Itinerary => generateItinerary({ prefs: demoPrefs, ctx, startDate: SATURDAY });
 const settingOf = (id?: string) => (id ? ctx.spotById.get(id)!.setting : undefined);
+
+/** 再計画エンジンの提案をそのまま確定した旅程 */
+const apply = (itin: Itinerary, event: ReplanEvent, nowMin?: number) => replan(itin, event, ctx, { dayIndex: 0, nowMin }).after;
 
 describe("デモシナリオ: 雨 → 屋外予定を切り替える", () => {
   it("13時に雨が降り出すと、残りの屋外ブロックが影響を受ける（デモが成立する）", () => {
@@ -38,7 +32,9 @@ describe("デモシナリオ: 雨 → 屋外予定を切り替える", () => {
     const itin = demo();
     const rain = { startMin: hm(13), prob: 80 };
     const impact = detectRainImpact(itin.days[0], ctx, sunny, hm(13), "light-rain-ok", rain);
-    const after = switchBlocks(itin, impact.switchable.map((b) => b.id), ctx, { nowMin: hm(13) });
+    const ids = impact.switchable.map((b) => b.id);
+    const result = replan(itin, { type: "plan-b", blockIds: ids }, ctx, { dayIndex: 0, nowMin: hm(13) });
+    const after = result.after;
 
     for (const b of impact.switchable) {
       const nb = locateBlock(after, b.id)!.block;
@@ -47,37 +43,31 @@ describe("デモシナリオ: 雨 → 屋外予定を切り替える", () => {
       expect(nb.spotId).toBe(b.planB!.spotId);
       expect(nb.planB!.spotId).toBe(b.spotId); // 元の予定に戻せる
     }
-    const remaining = detectRainImpact(after.days[0], ctx, sunny, hm(13), "light-rain-ok", rain);
-    expect(remaining.switchable).toHaveLength(0);
+    expect(detectRainImpact(after.days[0], ctx, sunny, hm(13), "light-rain-ok", rain).switchable).toHaveLength(0);
 
-    // 時系列は崩れていない（重なり・営業時間外がない）
     const blocks = after.days[0].blocks;
     for (let i = 1; i < blocks.length; i++) expect(blocks[i].startMin).toBeGreaterThanOrEqual(blocks[i - 1].endMin);
     expect(blocks.some((b) => b.issues?.includes("outside-hours"))).toBe(false);
-    // 13時より前のブロックは変わらない
-    const before = itin.days[0].blocks.filter((b) => b.startMin <= hm(13));
-    for (const b of before) expect(locateBlock(after, b.id)!.block.spotId).toBe(b.spotId);
+    for (const b of itin.days[0].blocks.filter((x) => x.startMin <= hm(13))) expect(locateBlock(after, b.id)!.block.spotId).toBe(b.spotId);
+    // 提案は確定するまで元の旅程を変えない
+    expect(result.before).toBe(itin);
   });
 
   it("『1つだけ切り替える』と、ほかの屋外ブロックはそのまま", () => {
     const itin = demo();
-    const rain = { startMin: hm(13), prob: 80 };
-    const impact = detectRainImpact(itin.days[0], ctx, sunny, hm(13), "light-rain-ok", rain);
+    const impact = detectRainImpact(itin.days[0], ctx, sunny, hm(13), "light-rain-ok", { startMin: hm(13), prob: 80 });
     const first = impact.switchable[0];
-    const after = switchBlock(itin, first.id, ctx, { nowMin: hm(13) });
+    const after = apply(itin, { type: "plan-b", blockIds: [first.id] }, hm(13));
     expect(locateBlock(after, first.id)!.block.switched).toBe(true);
-    for (const other of impact.switchable.slice(1)) {
-      expect(locateBlock(after, other.id)!.block.switched).toBeFalsy();
-    }
+    for (const other of impact.switchable.slice(1)) expect(locateBlock(after, other.id)!.block.switched).toBeFalsy();
   });
 
   it("切り替えた予定は、もう一度切り替えると元の予定に戻る", () => {
     const itin = demo();
     const target = itin.days[0].blocks.find((b) => b.planB)!;
-    const switched = switchBlock(itin, target.id, ctx);
+    const switched = apply(itin, { type: "plan-b", blockIds: [target.id] });
     expect(locateBlock(switched, target.id)!.block.spotId).not.toBe(target.spotId);
-    const back = switchBlock(switched, target.id, ctx);
-    const restored = locateBlock(back, target.id)!.block;
+    const restored = locateBlock(apply(switched, { type: "plan-b", blockIds: [target.id] }), target.id)!.block;
     expect(restored.spotId).toBe(target.spotId);
     expect(restored.switched).toBeFalsy();
   });
@@ -85,7 +75,7 @@ describe("デモシナリオ: 雨 → 屋外予定を切り替える", () => {
   it("切替後の Plan B は別ブロックの Plan B と重複しない／旅程に重複スポットがない", () => {
     const itin = demo();
     const ids = itin.days[0].blocks.filter((b) => b.planB).map((b) => b.id);
-    const after = switchBlocks(itin, ids, ctx);
+    const after = apply(itin, { type: "plan-b", blockIds: ids });
     const spotIds = after.days[0].blocks.map((b) => b.spotId).filter(Boolean);
     expect(new Set(spotIds).size).toBe(spotIds.length);
   });
@@ -118,28 +108,27 @@ describe("雨の通知条件（雨への許容度）", () => {
 });
 
 describe("遅延と差分表示", () => {
-  it("遅延すると、ずれた予定・余白の縮み・スキップ候補が差分に出る", () => {
+  it("遅延すると、ずれた予定・余白の縮みが差分に出る。開始済みの予定は動かない", () => {
     const itin = demo();
-    const after = applyDelay(itin, 0, 90, hm(13), ctx);
-    const diff = diffItineraries(itin, after);
-    const summary = summarizeDiff(diff);
-    expect(diff.length).toBeGreaterThan(0);
+    const r = replan(itin, { type: "delay", minutes: 90 }, ctx, { dayIndex: 0, nowMin: hm(13) });
+    expect(r.diff.length).toBeGreaterThan(0);
+    const summary = summarizeDiff(r.diff);
     expect(summary.maxShiftMin).toBeGreaterThan(0);
     expect(summary.maxShiftMin).toBeLessThanOrEqual(90);
-    // 開始済みのブロックは差分に出ない
-    for (const d of diff) expect(d.before.startMin).toBeGreaterThan(hm(13) - 1);
+    for (const d of r.diff) expect(d.before.startMin).toBeGreaterThan(hm(13) - 1);
+    // diff は旅程どうしの比較と一致する
+    expect(r.diff).toEqual(diffItineraries(itin, r.after));
   });
 
   it("Plan B 切替の差分は replaced として、元と切替後のスポットを持つ", () => {
     const itin = demo();
     const target = itin.days[0].blocks.find((b) => b.planB)!;
-    const after = switchBlock(itin, target.id, ctx);
-    const diff = diffItineraries(itin, after);
-    const item = diff.find((d) => d.blockId === target.id)!;
+    const r = replan(itin, { type: "plan-b", blockIds: [target.id] }, ctx, { dayIndex: 0 });
+    const item = r.diff.find((d) => d.blockId === target.id)!;
     expect(item.kind).toBe("replaced");
     expect(item.before.spotId).toBe(target.spotId);
     expect(item.after.spotId).toBe(target.planB!.spotId);
-    expect(summarizeDiff(diff).replaced).toBe(1);
+    expect(summarizeDiff(r.diff).replaced).toBe(1);
   });
 
   it("変更がなければ差分は空", () => {
@@ -152,18 +141,17 @@ describe("臨時休業とスキップ", () => {
   it("臨時休業にすると、該当ブロックは休業扱いになり、代わりの候補が出る", () => {
     const itin = demo();
     const target = itin.days[0].blocks.find((b) => b.spotId && b.startMin > hm(13))!;
-    const after = markSpotClosed(itin, target.spotId!, 0, hm(13), ctx);
+    const after = apply(itin, { type: "closure", spotId: target.spotId! }, hm(13));
     const nb = locateBlock(after, target.id)!.block;
     expect(nb.closed).toBe(true);
     expect(after.closedSpotIds).toContain(target.spotId);
-    // 休業のスポットが他のブロックの Plan B になることはない
     for (const b of after.days[0].blocks) expect(b.planB?.spotId).not.toBe(target.spotId);
 
     const suggestion = suggestReplacement(after, target.id, ctx);
     expect(suggestion).not.toBeNull();
     expect(suggestion!.spot.id).not.toBe(target.spotId);
 
-    const replaced = replaceBlockSpot(after, target.id, suggestion!.spot.id, ctx, { nowMin: hm(13) });
+    const replaced = apply(itin, { type: "closure", spotId: target.spotId!, replacementSpotId: suggestion!.spot.id }, hm(13));
     const rb = locateBlock(replaced, target.id)!.block;
     expect(rb.spotId).toBe(suggestion!.spot.id);
     expect(rb.closed).toBeFalsy();
@@ -172,7 +160,7 @@ describe("臨時休業とスキップ", () => {
   it("休業ブロックの後ろの予定は、休業で早まることはない（計画上の時刻を保つ）", () => {
     const itin = demo();
     const idx = itin.days[0].blocks.findIndex((b) => b.spotId && b.startMin > hm(13));
-    const after = markSpotClosed(itin, itin.days[0].blocks[idx].spotId!, 0, hm(13), ctx);
+    const after = apply(itin, { type: "closure", spotId: itin.days[0].blocks[idx].spotId! }, hm(13));
     for (let i = idx + 1; i < itin.days[0].blocks.length; i++) {
       const b = itin.days[0].blocks[i];
       if (b.label === "buffer") continue;
@@ -180,15 +168,13 @@ describe("臨時休業とスキップ", () => {
     }
   });
 
-  it("スキップした予定は時間を消費せず、「それでも行く」で候補から外せる", () => {
+  it("スキップした予定は時間を消費せず、取り消すと元に戻る", () => {
     const itin = demo();
     const opt = itin.days[0].blocks.find((b) => b.label === "optional")!;
-    const skipped = skipBlocks(itin, 0, [opt.id], hm(9), ctx);
+    const skipped = apply(itin, { type: "skip", blockIds: [opt.id] });
     expect(locateBlock(skipped, opt.id)!.block.skip).toBe("skipped");
-    const kept = keepBlock(skipped, 0, opt.id, hm(9), ctx);
-    const kb = locateBlock(kept, opt.id)!.block;
-    expect(kb.skip).toBeUndefined();
-    expect(kb.keepAnyway).toBe(true);
+    const restored = apply(skipped, { type: "restore", blockId: opt.id });
+    expect(locateBlock(restored, opt.id)!.block.skip).toBeUndefined();
   });
 });
 
@@ -226,7 +212,7 @@ describe("次にやること", () => {
 
   it("スキップした予定は『次の予定』にならない", () => {
     const second = day.blocks.filter((b) => b.spotId)[1];
-    const skipped = skipBlocks(itin, 0, [second.id], 0, ctx).days[0];
+    const skipped = apply(itin, { type: "skip", blockIds: [second.id] }).days[0];
     const next = getNextAction(skipped, ctx, firstSpot.endMin + 1);
     expect(next.next?.id).not.toBe(second.id);
   });

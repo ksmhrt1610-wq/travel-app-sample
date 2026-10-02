@@ -2,7 +2,8 @@ import { findOpenSlot, isOpenOnDate, overlapsCrowded } from "./availability";
 import { addDays } from "./time";
 import { attachPlanBs, needsPlanB } from "./planb";
 import { baseScore, SCORE_WEIGHTS } from "./scoring";
-import { commitBaseline, recomputeDay } from "./schedule";
+import { defaultMembers } from "./fixed";
+import { commitBaseline, DEFAULT_MARGIN_MIN, recomputeDay } from "./schedule";
 import type {
   Block,
   Day,
@@ -439,6 +440,8 @@ export const generateItinerary: ItineraryGenerator = (input: GenerateInput): Iti
     prefs,
     days,
     closedSpotIds: [],
+    members: defaultMembers(prefs.companions),
+    settings: { marginMin: DEFAULT_MARGIN_MIN },
   };
   return attachPlanBs(itin, ctx);
 };

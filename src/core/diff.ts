@@ -1,16 +1,23 @@
-import type { Itinerary } from "./types";
+import type { Block, Itinerary } from "./types";
 
 export type DiffKind =
   /** 予定のスポットが入れ替わった（Plan B 切替・休業の代替） */
   | "replaced"
+  /** 滞在時間が短くなった（時間が足りないとき） */
+  | "shortened"
+  /** 順番が入れ替わった（「かなり疲れた」で近い順に並べ直したとき） */
+  | "moved"
   /** 開始時刻が動いた */
   | "shifted"
   /** 余白の長さが変わった（遅れの吸収） */
   | "buffer-changed"
-  | "skip-candidate"
+  /** 休憩・固定時刻などが追加された */
+  | "inserted"
+  /** 固定時刻などが外された */
+  | "removed"
   | "skipped"
   | "closed"
-  /** スキップ候補・スキップが取り消された */
+  /** スキップが取り消された */
   | "restored";
 
 export interface DiffSide {
@@ -27,6 +34,11 @@ export interface DiffItem {
   after: DiffSide;
   /** 開始時刻の変化（分）。後ろにずれたら正 */
   deltaMin: number;
+  /** 追加・外されたブロックの種類（休憩・固定など）を表示するための情報 */
+  label?: Block["label"];
+  /** 滞在時間の変化（短縮のとき）。分 */
+  durationFrom?: number;
+  durationTo?: number;
 }
 
 const side = (b: { spotId?: string; startMin: number; endMin: number }): DiffSide => ({
@@ -42,21 +54,54 @@ export function diffItineraries(before: Itinerary, after: Itinerary): DiffItem[]
     const dayBefore = before.days.find((d) => d.index === dayAfter.index);
     if (!dayBefore) continue;
     const byId = new Map(dayBefore.blocks.map((b) => [b.id, b]));
+    const afterIds = new Set(dayAfter.blocks.map((b) => b.id));
+
+    // 順番が入れ替わったかは、前後に共通するブロックだけを並べて見る
+    const commonBefore = dayBefore.blocks.filter((b) => afterIds.has(b.id)).map((b) => b.id);
+    const commonAfter = dayAfter.blocks.filter((b) => byId.has(b.id)).map((b) => b.id);
+
     for (const a of dayAfter.blocks) {
       const b = byId.get(a.id);
-      if (!b) continue;
-      const base = { dayIndex: dayAfter.index, blockId: a.id, before: side(b), after: side(a), deltaMin: a.startMin - b.startMin };
+      if (!b) {
+        items.push({
+          kind: "inserted",
+          dayIndex: dayAfter.index,
+          blockId: a.id,
+          before: side(a),
+          after: side(a),
+          deltaMin: 0,
+          label: a.label,
+        });
+        continue;
+      }
+      const base = {
+        dayIndex: dayAfter.index,
+        blockId: a.id,
+        before: side(b),
+        after: side(a),
+        deltaMin: a.startMin - b.startMin,
+        label: a.label,
+      };
+      const durB = b.endMin - b.startMin;
+      const durA = a.endMin - a.startMin;
 
       let kind: DiffKind | null = null;
       if (b.spotId !== a.spotId) kind = "replaced";
       else if (a.closed && !b.closed) kind = "closed";
       else if (a.skip === "skipped" && b.skip !== "skipped") kind = "skipped";
-      else if (a.skip === "candidate" && b.skip !== "candidate") kind = "skip-candidate";
-      else if (!a.skip && (b.skip === "candidate" || b.skip === "skipped")) kind = "restored";
-      else if (a.label === "buffer" && a.endMin - a.startMin !== b.endMin - b.startMin) kind = "buffer-changed";
+      else if (!a.skip && b.skip === "skipped") kind = "restored";
+      else if (a.skip === "skipped") kind = null;
+      else if (a.label !== "buffer" && a.label !== "fixed" && durA < durB) kind = "shortened";
+      else if (commonBefore.indexOf(a.id) !== commonAfter.indexOf(a.id)) kind = "moved";
+      else if (a.label === "buffer" && durA !== durB) kind = "buffer-changed";
       else if (a.label !== "buffer" && (a.startMin !== b.startMin || a.endMin !== b.endMin)) kind = "shifted";
 
-      if (kind) items.push({ kind, ...base });
+      if (kind) items.push({ kind, ...base, durationFrom: kind === "shortened" ? durB : undefined, durationTo: kind === "shortened" ? durA : undefined });
+    }
+    for (const b of dayBefore.blocks) {
+      if (!afterIds.has(b.id)) {
+        items.push({ kind: "removed", dayIndex: dayAfter.index, blockId: b.id, before: side(b), after: side(b), deltaMin: 0, label: b.label });
+      }
     }
   }
   return items;
@@ -65,7 +110,9 @@ export function diffItineraries(before: Itinerary, after: Itinerary): DiffItem[]
 export interface DiffSummary {
   replaced: number;
   shifted: number;
-  skipCandidates: number;
+  shortened: number;
+  moved: number;
+  inserted: number;
   skipped: number;
   closed: number;
   /** 後ろにずれた予定のうち最大のずれ（分） */
@@ -75,11 +122,13 @@ export interface DiffSummary {
 }
 
 export function summarizeDiff(items: DiffItem[]): DiffSummary {
-  const s: DiffSummary = { replaced: 0, shifted: 0, skipCandidates: 0, skipped: 0, closed: 0, maxShiftMin: 0, bufferAbsorbedMin: 0 };
+  const s: DiffSummary = { replaced: 0, shifted: 0, shortened: 0, moved: 0, inserted: 0, skipped: 0, closed: 0, maxShiftMin: 0, bufferAbsorbedMin: 0 };
   for (const it of items) {
     if (it.kind === "replaced") s.replaced++;
     if (it.kind === "shifted") s.shifted++;
-    if (it.kind === "skip-candidate") s.skipCandidates++;
+    if (it.kind === "shortened") s.shortened++;
+    if (it.kind === "moved") s.moved++;
+    if (it.kind === "inserted") s.inserted++;
     if (it.kind === "skipped") s.skipped++;
     if (it.kind === "closed") s.closed++;
     if (it.kind === "buffer-changed") {

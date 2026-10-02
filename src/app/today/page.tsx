@@ -4,28 +4,24 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { adapters } from "@/adapters";
 import { BlockDetailSheet } from "@/components/BlockDetailSheet";
-import { ClosureBanner, RainBanner, SkipBanner } from "@/components/Banners";
+import { ClosureBanner, DepartureBanner, RainBanner, WalkBanner } from "@/components/Banners";
 import { DiffPanel } from "@/components/DiffPanel";
+import { FixedTimesPanel } from "@/components/FixedTimesPanel";
 import { NextActionCard } from "@/components/NextActionCard";
+import { ProposalCard } from "@/components/ProposalCard";
 import { ShareDialog } from "@/components/ShareDialog";
 import { SIM_MIN, SimulationPanel } from "@/components/SimulationPanel";
+import { TiredSheet } from "@/components/TiredSheet";
 import { Timeline } from "@/components/Timeline";
+import { WalkMeter } from "@/components/WalkMeter";
 import { Button, cx, useToast } from "@/components/ui";
-import {
-  applyDelay,
-  keepBlock,
-  markSpotClosed,
-  replaceBlockSpot,
-  skipAllCandidates,
-  skipBlocks,
-  suggestReplacement,
-  switchBlock,
-  switchBlocks,
-} from "@/core/actions";
-import { diffItineraries, type ChangeSet } from "@/core/diff";
+import { suggestReplacement } from "@/core/actions";
+import { absenceByBlock, departureNotices, memberFixedStatuses, nextFixedCountdown } from "@/core/fixed";
+import { describeEvent, isQuietChange, replan, type ReplanEvent, type ReplanResult } from "@/core/replan";
 import { formatDateJa, formatHHMM } from "@/core/time";
 import { getNextAction } from "@/core/today";
 import type { Itinerary } from "@/core/types";
+import { dayWalking, suggestRestForWalking } from "@/core/walking";
 import { detectRainImpact, type HourlyWeather, type RainOverride } from "@/core/weather";
 import { useTrip, type TodayState } from "@/store/tripStore";
 import { usePlanningContext } from "@/store/usePlanningContext";
@@ -33,12 +29,19 @@ import { usePlanningContext } from "@/store/usePlanningContext";
 /** その日の最初の予定の40分前を、シミュレーションの初期の現在時刻にする */
 function initialNow(itin: Itinerary, dayIndex: number): number {
   const day = itin.days[dayIndex];
-  const first = day.blocks.find((b) => b.spotId) ?? day.blocks[0];
+  const first = day.blocks.find((b) => b.spotId || b.fixed) ?? day.blocks[0];
   return Math.max(SIM_MIN, Math.floor(((first?.startMin ?? day.startMin) - 40) / 5) * 5);
 }
 
 function initToday(itin: Itinerary, dayIndex = 0): TodayState {
-  return { itinerary: structuredClone(itin), dayIndex, nowMin: initialNow(itin, dayIndex), history: [] };
+  return { itinerary: structuredClone(itin), dayIndex, nowMin: initialNow(itin, dayIndex), history: [], dismissed: [] };
+}
+
+interface Proposal {
+  event: ReplanEvent;
+  title: string;
+  result: ReplanResult;
+  removeMustIds: string[];
 }
 
 export default function TodayPage() {
@@ -48,6 +51,8 @@ export default function TodayPage() {
   const [weather, setWeather] = useState<HourlyWeather[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
+  const [tiredOpen, setTiredOpen] = useState(false);
+  const [proposal, setProposal] = useState<Proposal | null>(null);
   const toast = useToast();
 
   // 当日モードの作業コピーを、もとの旅程から作る
@@ -74,6 +79,7 @@ export default function TodayPage() {
   const nowMin = today?.nowMin ?? 0;
   const dayIndex = today?.dayIndex ?? 0;
   const itin = today?.itinerary;
+  const margin = itin?.settings.marginMin ?? 10;
 
   const impact = useMemo(
     () =>
@@ -88,7 +94,6 @@ export default function TodayPage() {
     () => (ctx && itin ? new Map(closedBlocks.map((b) => [b.id, suggestReplacement(itin, b.id, ctx)])) : new Map()),
     [closedBlocks, ctx, itin],
   );
-  const candidates = useMemo(() => (day ? day.blocks.filter((b) => b.skip === "candidate" && b.startMin > nowMin) : []), [day, nowMin]);
 
   if (!ready || !ctx) return <p className="py-16 text-center text-sm text-slate-500">読み込み中…</p>;
 
@@ -106,40 +111,41 @@ export default function TodayPage() {
   }
   if (!today || !day || !itin) return <p className="py-16 text-center text-sm text-slate-500">準備中…</p>;
 
-  /* ---------- 操作 ---------- */
+  /* ---------- 再計画エンジンの提案と確定 ---------- */
 
-  /** 旅程に変更を加え、前後の差分を履歴に残す */
-  const act = (title: string, fn: (it: Itinerary) => Itinerary, doneMessage?: string) => {
-    const before = today.itinerary;
-    const after = fn(before);
-    const items = diffItineraries(before, after);
+  /** イベントを再計画エンジンに渡し、組み直し案を作る（確定するまで旅程は変わらない） */
+  const propose = (event: ReplanEvent, removeMustIds: string[] = []) => {
+    const result = replan(today.itinerary, event, ctx, { dayIndex: today.dayIndex, nowMin: today.nowMin, removeMustIds });
+    const title = describeEvent(event, ctx, today.itinerary);
+    if (isQuietChange(result)) {
+      commit(result, title); // 余裕時間の変更・固定時刻を外すだけ: 確認なしで反映
+      return;
+    }
+    setProposal({ event, title, result, removeMustIds });
+  };
+
+  const commit = (result: ReplanResult, title: string) => {
     update((t) => {
       if (!t.today) return t;
-      const history: ChangeSet[] = items.length
-        ? [{ id: `${Date.now()}-${t.today.history.length}`, atMin: t.today.nowMin, title, items }, ...t.today.history].slice(0, 20)
+      const history = result.diff.length
+        ? [{ id: `${Date.now()}-${t.today.history.length}`, atMin: t.today.nowMin, title, items: result.diff }, ...t.today.history].slice(0, 20)
         : t.today.history;
-      return { ...t, today: { ...t.today, itinerary: after, history } };
+      return { ...t, today: { ...t.today, itinerary: result.after, history } };
     });
-    toast.show(items.length ? (doneMessage ?? "旅程を立て直しました") : "旅程への影響はありませんでした");
+    toast.show(result.diff.length ? "確定して、旅程に反映しました" : "旅程への影響はありませんでした");
+    setProposal(null);
   };
 
-  const setNow = (min: number) => update((t) => (t.today ? { ...t, today: { ...t.today, nowMin: min } } : t));
+  const confirm = () => proposal && commit(proposal.result, proposal.title);
+
+  const setNow = (min: number) => {
+    setProposal(null);
+    update((t) => (t.today ? { ...t, today: { ...t.today, nowMin: min } } : t));
+  };
+  const dismiss = (id: string) => update((t) => (t.today ? { ...t, today: { ...t.today, dismissed: [...(t.today.dismissed ?? []), id] } } : t));
   const spotName = (id?: string) => (id ? ctx.spotById.get(id)?.name : undefined) ?? "予定";
 
-  const switchOne = (blockId: string) => {
-    const b = day.blocks.find((x) => x.id === blockId);
-    const alt = b?.planB ? spotName(b.planB.spotId) : "";
-    act(
-      `「${spotName(b?.spotId)}」→ ${b?.switched ? "元の予定に戻す" : `Plan B「${alt}」に切り替え`}`,
-      (it) => switchBlock(it, blockId, ctx, { nowMin }),
-      b?.switched ? "元の予定に戻しました" : "Plan B に切り替えました",
-    );
-  };
-
-  const switchAll = () => {
-    const ids = impact.switchable.map((b) => b.id);
-    act(`雨 → 残りの屋外予定 ${ids.length}件を Plan B に切り替え`, (it) => switchBlocks(it, ids, ctx, { nowMin }), `${ids.length}件を Plan B に切り替えました`);
-  };
+  /* ---------- 表示用の計算 ---------- */
 
   const rainKey = today.rain ? `${today.rain.prob}@${today.rain.startMin}` : null;
   const rainAffected = impact.switchable.length + impact.noPlanB.length;
@@ -147,9 +153,23 @@ export default function TodayPage() {
   const tolerance = itin.prefs.rainTolerance;
 
   const action = getNextAction(day, ctx, nowMin);
+  const fixedCountdown = nextFixedCountdown(day, ctx, nowMin, margin);
+  const statuses = memberFixedStatuses(day, ctx, margin, itin.members);
+  const absence = absenceByBlock(statuses);
+  const memberDepartures = statuses
+    .filter((s) => s.event.timeMin > nowMin)
+    .map((s) => ({ who: s.memberNames.join("・"), title: s.event.title, departBy: s.departBy, timeMin: s.event.timeMin }));
+  const dismissed = today.dismissed ?? [];
+  const notices = departureNotices(day, ctx, nowMin, margin, itin.members).filter((n) => !dismissed.includes(n.id));
+
+  const walking = dayWalking(day, ctx, itin.prefs.pace, nowMin);
+  const walkSuggest = suggestRestForWalking(day, ctx, itin.prefs.pace, nowMin);
+  const showWalk = walkSuggest && !dismissed.includes(`walk:${walkSuggest.beforeBlockId}`);
+  const walkNext = walkSuggest ? day.blocks.find((b) => b.id === walkSuggest.beforeBlockId) : undefined;
+
   const latest = today.history[0];
   const changes = new Map((latest?.items ?? []).filter((i) => i.dayIndex === dayIndex).map((i) => [i.blockId, i]));
-  const closable = day.blocks.filter((b) => b.spotId && !b.closed && b.skip !== "skipped" && b.endMin > nowMin);
+  const closable = day.blocks.filter((b) => b.spotId && !b.fixed && !b.closed && b.skip !== "skipped" && b.endMin > nowMin);
   const selected = selectedId ? (day.blocks.find((b) => b.id === selectedId) ?? null) : null;
 
   return (
@@ -173,9 +193,10 @@ export default function TodayPage() {
               key={d.index}
               role="tab"
               aria-selected={d.index === dayIndex}
-              onClick={() =>
-                update((t) => (t.today ? { ...t, today: { ...t.today, dayIndex: d.index, nowMin: initialNow(t.today.itinerary, d.index), rain: undefined } } : t))
-              }
+              onClick={() => {
+                setProposal(null);
+                update((t) => (t.today ? { ...t, today: { ...t.today, dayIndex: d.index, nowMin: initialNow(t.today.itinerary, d.index), rain: undefined } } : t));
+              }}
               className={cx("min-h-10 rounded-xl border text-sm font-bold", d.index === dayIndex ? "border-slate-900 bg-slate-900 text-white" : "border-slate-300 bg-white text-slate-700")}
             >
               {d.index + 1}日目
@@ -184,16 +205,35 @@ export default function TodayPage() {
         </div>
       )}
 
-      <NextActionCard action={action} nowMin={nowMin} />
+      <NextActionCard action={action} nowMin={nowMin} fixed={fixedCountdown} memberDepartures={memberDepartures} />
+
+      <Button variant="secondary" size="lg" className="mt-3 w-full border-amber-300 bg-amber-50 text-amber-950 hover:bg-amber-100" onClick={() => setTiredOpen(true)} data-testid="tired-button">
+        😮‍💨 疲れた（休憩を入れる）
+      </Button>
 
       <div className="mt-3 space-y-3">
+        {proposal && (
+          <ProposalCard
+            result={proposal.result}
+            ctx={ctx}
+            title={proposal.title}
+            onConfirm={confirm}
+            onCancel={() => setProposal(null)}
+            onRemoveMust={(blockId) => propose(proposal.event, [...proposal.removeMustIds, blockId])}
+          />
+        )}
+
+        {notices.map((n) => (
+          <DepartureBanner key={n.id} notice={n} onDismiss={() => dismiss(n.id)} />
+        ))}
+
         {showRainBanner && today.rain && (
           <RainBanner
             impact={impact}
             rain={today.rain}
             ctx={ctx}
-            onSwitchOne={() => impact.switchable[0] && switchOne(impact.switchable[0].id)}
-            onSwitchAll={switchAll}
+            onSwitchOne={() => impact.switchable[0] && propose({ type: "plan-b", blockIds: [impact.switchable[0].id] })}
+            onSwitchAll={() => propose({ type: "plan-b", blockIds: impact.switchable.map((b) => b.id) })}
             onDismiss={() => update((t) => (t.today ? { ...t, today: { ...t.today, rainDismissed: rainKey ?? undefined } } : t))}
           />
         )}
@@ -216,24 +256,30 @@ export default function TodayPage() {
             suggestion={suggestions.get(b.id) ?? null}
             onReplace={() => {
               const s = suggestions.get(b.id);
-              if (s) act(`「${spotName(b.spotId)}」臨時休業 → 「${s.spot.name}」に切り替え`, (it) => replaceBlockSpot(it, b.id, s.spot.id, ctx, { nowMin }), "代わりの予定に切り替えました");
+              if (s) propose({ type: "closure", spotId: b.spotId!, replacementSpotId: s.spot.id });
             }}
-            onSkip={() => act(`「${spotName(b.spotId)}」臨時休業 → スキップ`, (it) => skipBlocks(it, dayIndex, [b.id], nowMin, ctx), "スキップしました")}
+            onSkip={() => propose({ type: "skip", blockIds: [b.id] })}
           />
         ))}
-        {candidates.length > 0 && (
-          <SkipBanner
-            blocks={candidates}
-            ctx={ctx}
-            onSkipAll={() => act(`スキップ候補 ${candidates.length}件をスキップ`, (it) => skipAllCandidates(it, dayIndex, nowMin, ctx), "スキップして立て直しました")}
-            onKeep={(id) => act(`「${spotName(day.blocks.find((b) => b.id === id)?.spotId)}」は、それでも行く`, (it) => keepBlock(it, dayIndex, id, nowMin, ctx))}
+        {showWalk && walkSuggest && walkNext && (
+          <WalkBanner
+            suggestion={walkSuggest}
+            nextName={walkNext.fixed ? walkNext.fixed.title : spotName(walkNext.spotId)}
+            onAccept={() => {
+              dismiss(`walk:${walkSuggest.beforeBlockId}`);
+              propose({ type: "tired", level: "light", source: "walk-limit" });
+            }}
+            onDismiss={() => dismiss(`walk:${walkSuggest.beforeBlockId}`)}
           />
         )}
-        <DiffPanel history={today.history} ctx={ctx} />
+
+        <WalkMeter walking={walking} pace={itin.prefs.pace} />
+        <FixedTimesPanel itinerary={itin} ctx={ctx} dayIndex={dayIndex} onPropose={(e) => propose(e)} />
+        <DiffPanel history={today.history} ctx={ctx} itin={itin} />
       </div>
 
       <h2 className="mb-2 mt-5 text-sm font-bold text-slate-700">今日のタイムライン</h2>
-      <Timeline day={day} ctx={ctx} onOpen={setSelectedId} nowMin={nowMin} changes={changes} />
+      <Timeline day={day} ctx={ctx} onOpen={setSelectedId} nowMin={nowMin} changes={changes} members={itin.members} marginMin={margin} />
 
       <BlockDetailSheet
         open={!!selected}
@@ -243,17 +289,32 @@ export default function TodayPage() {
         ctx={ctx}
         mode="live"
         nowMin={nowMin}
+        marginMin={margin}
+        absent={selected ? absence.get(selected.id) : undefined}
         onSwitch={(id) => {
-          switchOne(id);
+          propose({ type: "plan-b", blockIds: [id] });
           setSelectedId(null);
         }}
         onSkip={(id) => {
-          act(`「${spotName(day.blocks.find((b) => b.id === id)?.spotId)}」をスキップ`, (it) => skipBlocks(it, dayIndex, [id], nowMin, ctx), "スキップしました");
+          propose({ type: "skip", blockIds: [id] });
           setSelectedId(null);
         }}
-        onKeep={(id) => {
-          act(`「${spotName(day.blocks.find((b) => b.id === id)?.spotId)}」は、それでも行く`, (it) => keepBlock(it, dayIndex, id, nowMin, ctx));
+        onRestore={(id) => {
+          propose({ type: "restore", blockId: id });
           setSelectedId(null);
+        }}
+        onRemoveFixed={(id) => {
+          propose({ type: "fixed-remove", fixedId: id });
+          setSelectedId(null);
+        }}
+      />
+
+      <TiredSheet
+        open={tiredOpen}
+        onClose={() => setTiredOpen(false)}
+        onChoose={(level) => {
+          setTiredOpen(false);
+          propose({ type: "tired", level });
         }}
       />
 
@@ -268,11 +329,12 @@ export default function TodayPage() {
           toast.show(`☔ ${formatHHMM(rain.startMin)}から降水確率${rain.prob}%の雨を想定しました`);
         }}
         onStopRain={() => update((t) => (t.today ? { ...t, today: { ...t.today, rain: undefined, rainDismissed: undefined } } : t))}
-        onDelay={(m) => act(`電車が${m}分遅延`, (it) => applyDelay(it, dayIndex, m, nowMin, ctx), `遅延${m}分を反映して、後ろの予定を計算し直しました`)}
+        onDelay={(m) => propose({ type: "delay", minutes: m })}
         closable={closable}
         ctx={ctx}
-        onClose={(spotId) => act(`「${spotName(spotId)}」が臨時休業`, (it) => markSpotClosed(it, spotId, dayIndex, nowMin, ctx), "臨時休業を反映しました")}
+        onClose={(spotId) => propose({ type: "closure", spotId })}
         onReset={() => {
+          setProposal(null);
           update((t) => (t.itinerary ? { ...t, today: initToday(t.itinerary, today.dayIndex) } : t));
           toast.show("デモをリセットしました");
         }}

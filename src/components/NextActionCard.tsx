@@ -1,21 +1,73 @@
 "use client";
 
+import type { FixedCountdown } from "@/core/fixed";
 import { mapsDirectionsUrl, mapsSearchUrl } from "@/core/maps";
 import { travelLabel } from "@/core/labels";
 import { formatDuration, formatHHMM } from "@/core/time";
 import type { NextAction } from "@/core/today";
 import { Chip, cx } from "./ui";
 
+export interface MemberDeparture {
+  who: string;
+  title: string;
+  departBy: number;
+  timeMin: number;
+}
+
+/** 直近の固定時刻までの逆算。例: 17:42 までにここを出ないと、太宰府駅 18:05 の電車に間に合いません */
+function FixedCountdownBlock({ fixed, members, nowMin }: { fixed: FixedCountdown | null; members: MemberDeparture[]; nowMin: number }) {
+  if (!fixed && members.length === 0) return null;
+  return (
+    <div className="mt-3 space-y-1.5 rounded-xl border border-amber-300/50 bg-amber-400/10 px-3 py-2" data-testid="fixed-countdown">
+      <p className="text-[11px] font-bold text-amber-200">🔒 固定時刻</p>
+      {fixed &&
+        (fixed.minutesLeft >= 0 ? (
+          <>
+            <p className="text-[13px] font-bold leading-snug" data-testid="fixed-departby">
+              {formatHHMM(fixed.departBy)} までに{fixed.here ? "ここ" : fixed.pred ? `「${fixed.predName}」` : fixed.predName}を出ないと、{fixed.fixed.fixed!.title} に間に合いません
+            </p>
+            <p className="text-[11px] text-slate-300">
+              あと <strong className="text-amber-200">{formatDuration(fixed.minutesLeft)}</strong>（移動 約{fixed.travelMin}分＋余裕{fixed.marginMin}分）
+            </p>
+          </>
+        ) : (
+          <p className="text-[13px] font-bold leading-snug text-rose-300" data-testid="fixed-departby">
+            出発すべき時刻（{formatHHMM(fixed.departBy)}）を{formatDuration(-fixed.minutesLeft)}過ぎています。{fixed.fixed.fixed!.title} に間に合わない可能性があります
+          </p>
+        ))}
+      {members.map((m) => (
+        <p key={m.title} className="text-[12px] text-fuchsia-200" data-testid="fixed-member-departby">
+          {m.who}は {formatHHMM(m.departBy)} までにグループを出ないと、{m.title} に間に合いません
+          {m.departBy < nowMin ? "（過ぎています）" : `（あと${formatDuration(m.departBy - nowMin)}）`}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 /** 画面上部の「次にやること」カード。出発までの残り時間を大きく出す */
-export function NextActionCard({ action, nowMin }: { action: NextAction; nowMin: number }) {
+export function NextActionCard({
+  action,
+  nowMin,
+  fixed = null,
+  memberDepartures = [],
+}: {
+  action: NextAction;
+  nowMin: number;
+  fixed?: FixedCountdown | null;
+  memberDepartures?: MemberDeparture[];
+}) {
   const { state, current, currentSpot, next, nextSpot } = action;
 
   if (state === "finished" || state === "empty") {
     return (
       <section className="rounded-3xl bg-slate-900 p-5 text-white shadow-lg" data-testid="next-card" data-state={state}>
         <p className="text-xs font-bold text-slate-300">次にやること</p>
-        <p className="mt-1 text-xl font-extrabold">{state === "finished" ? "🎉 今日の予定はすべて終わりました" : "予定がありません"}</p>
-        <p className="mt-1 text-sm text-slate-300">おつかれさまでした。</p>
+        <p className="mt-1 text-xl font-extrabold">
+          {state === "finished" ? (fixed ? "🚉 予定はすべて終わりました" : "🎉 今日の予定はすべて終わりました") : "予定がありません"}
+        </p>
+        <p className="mt-1 text-sm text-slate-300">{fixed ? "あとは固定時刻に間に合うよう、出発するだけです。" : "おつかれさまでした。"}</p>
+        <FixedCountdownBlock fixed={fixed} members={memberDepartures} nowMin={nowMin} />
       </section>
     );
   }
@@ -86,6 +138,7 @@ export function NextActionCard({ action, nowMin }: { action: NextAction; nowMin:
       ) : (
         <p className="mt-3 text-lg font-extrabold">これが今日の最後の予定です</p>
       )}
+      <FixedCountdownBlock fixed={fixed} members={memberDepartures} nowMin={nowMin} />
     </section>
   );
 }

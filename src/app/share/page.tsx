@@ -91,7 +91,7 @@ function SharedView() {
       )}
 
       <div className="mt-4">
-        <Timeline day={day} ctx={ctx} onOpen={setSelectedId} />
+        <Timeline day={day} ctx={ctx} onOpen={setSelectedId} members={itinerary.members} marginMin={itinerary.settings.marginMin} />
       </div>
 
       <div className="mt-4 grid gap-2">
@@ -110,7 +110,7 @@ function SharedView() {
         </Link>
       </div>
 
-      <BlockDetailSheet open={!!selected} onClose={() => setSelectedId(null)} block={selected} day={day} ctx={ctx} mode="view" />
+      <BlockDetailSheet open={!!selected} onClose={() => setSelectedId(null)} block={selected} day={day} ctx={ctx} mode="view" marginMin={itinerary.settings.marginMin} />
     </div>
   );
 }

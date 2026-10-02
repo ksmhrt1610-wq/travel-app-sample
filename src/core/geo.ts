@@ -17,9 +17,11 @@ export function haversineM(a: LatLng, b: LatLng): number {
 export const DETOUR_FACTOR = 1.3;
 /** これ以下の道のりは徒歩 */
 export const WALK_MAX_M = 1000;
-const WALK_M_PER_MIN = 75; // 4.5km/h
+export const WALK_M_PER_MIN = 75; // 4.5km/h
 const TRANSIT_M_PER_MIN = 450; // 27km/h（待ち時間は別に加算）
 const TRANSIT_OVERHEAD_MIN = 10; // 乗り場までの移動・待ち時間
+const TAXI_M_PER_MIN = 500; // 30km/h
+const TAXI_OVERHEAD_MIN = 4; // 乗車までの待ち
 
 /**
  * 直線距離から徒歩・公共交通の概算移動時間を出す（モック実装用）。
@@ -37,3 +39,32 @@ export const estimateTravel: TravelEstimator = (from, to): TravelEstimate => {
     distanceM: Math.round(road),
   };
 };
+
+/** 徒歩だと何分かかるか（道のり m から） */
+export function walkMinutesFor(roadM: number): number {
+  return Math.ceil(roadM / WALK_M_PER_MIN);
+}
+
+/** 公共交通だと何分かかるか（道のり m から。乗り場までの移動・待ちを含む） */
+export function transitMinutesFor(roadM: number): number {
+  return Math.ceil(TRANSIT_OVERHEAD_MIN + roadM / TRANSIT_M_PER_MIN);
+}
+
+/** タクシーだと何分かかるか（道のり m から） */
+export function taxiMinutesFor(roadM: number): number {
+  return Math.ceil(TAXI_OVERHEAD_MIN + roadM / TAXI_M_PER_MIN);
+}
+
+/** 「かなり疲れた」以降に使う、徒歩の上限（m）。これを超える移動は公共交通にする */
+export const LOW_WALK_MAX_M = 600;
+
+/** 徒歩の上限を設けた見積もり。徒歩が上限を超える移動は公共交通の所要時間に置き換える */
+export function withWalkLimit(base: TravelEstimator, maxWalkM: number = LOW_WALK_MAX_M): TravelEstimator {
+  return (from, to) => {
+    const t = base(from, to);
+    if (t.mode === "walk" && t.distanceM > maxWalkM) {
+      return { mode: "transit", minutes: transitMinutesFor(t.distanceM), distanceM: t.distanceM };
+    }
+    return t;
+  };
+}

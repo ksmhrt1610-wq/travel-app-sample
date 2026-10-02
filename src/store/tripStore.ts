@@ -15,6 +15,8 @@ export interface TodayState {
   rain?: RainOverride;
   /** 雨の通知を閉じたときの rain の識別子 */
   rainDismissed?: string;
+  /** 閉じた通知（出発の通知・歩行距離の提案）の識別子 */
+  dismissed?: string[];
   history: ChangeSet[];
 }
 
@@ -24,7 +26,8 @@ export interface TripState {
   today?: TodayState;
 }
 
-const KEY = "replan-fukuoka:v1";
+// v2: 固定時刻・メンバー・休憩を追加したため、旧形式の保存データは読み込まない
+const KEY = "replan-fukuoka:v2";
 const EMPTY: TripState = {};
 
 let cache: TripState | undefined;

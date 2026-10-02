@@ -1,10 +1,16 @@
-import { findOpenSlot, overlapsCrowded } from "./availability";
-import type { Block, BlockIssue, Day, LatLng, PlanningContext } from "./types";
+import { findOpenSlot, isOpenOnDate, overlapsCrowded } from "./availability";
+import { withWalkLimit } from "./geo";
+import { parseHHMM } from "./time";
+import type { Block, BlockIssue, Day, LatLng, PlanningContext, Spot, TravelEstimate, TravelEstimator } from "./types";
 
 /** 余白ブロックが遅れを吸収して縮められる下限（分） */
 export const MIN_BUFFER_MIN = 10;
 /** 開店まで待ってでも入れる上限（分）。これを超える待ちは営業時間外として扱う */
 export const MAX_WAIT_FOR_OPENING_MIN = 90;
+/** 固定時刻の余裕時間の初期値（分） */
+export const DEFAULT_MARGIN_MIN = 10;
+/** 1日の終了予定時刻をこれだけ超えるまでは「許容範囲」とみなす（分） */
+export const DAY_END_TOLERANCE_MIN = 30;
 
 export type RecomputeMode =
   /** 計画上の開始時刻より早めない。遅延・スキップ・Plan B 切替向け */
@@ -18,10 +24,37 @@ export interface RecomputeOptions {
   nowMin?: number;
   /** 遅延（分）。最初の未開始ブロックの開始に加算され、そのブロックの notBefore として残る */
   delayMin?: number;
+  /** 固定時刻の余裕時間（分） */
+  marginMin?: number;
 }
 
 export function isInert(b: Block): boolean {
   return b.skip === "skipped" || !!b.closed;
+}
+
+/** ブロックの場所（スポット、または駅・宿など）。余白など場所のないブロックは undefined */
+export function placeOf(b: Block, ctx: PlanningContext): LatLng | undefined {
+  return b.spotId ? ctx.spotById.get(b.spotId) : b.place;
+}
+
+/** この日の移動見積もり。「かなり疲れた」以降は徒歩を短く見積もる */
+export function dayTravel(day: Day, ctx: PlanningContext): TravelEstimator {
+  return day.lowWalking ? withWalkLimit(ctx.travel) : ctx.travel;
+}
+
+/** 開店・閉店に合わせられなかったときの不足分（分）の目安 */
+function hoursLateBy(spot: Spot, date: string, start: number, duration: number): number {
+  if (!isOpenOnDate(spot, date)) return 600;
+  let best = Number.POSITIVE_INFINITY;
+  for (const r of spot.hours) {
+    const open = parseHHMM(r.open);
+    const close = parseHHMM(r.close);
+    let late = 0;
+    if (start + duration > close) late = Math.max(late, start + duration - close);
+    if (start < open) late = Math.max(late, open - start - MAX_WAIT_FOR_OPENING_MIN);
+    best = Math.min(best, Math.max(1, late));
+  }
+  return Number.isFinite(best) ? best : 1;
 }
 
 /**
@@ -29,102 +62,191 @@ export function isInert(b: Block): boolean {
  *
  * - 開始済み（startMin <= nowMin）のブロックは固定。
  * - 各ブロックの開始 = max(前の場所からの到着, 計画上の開始, notBefore)。営業開始まで待てる場合は待つ。
- * - 遅延は最初の未開始ブロックの開始を delayMin 遅らせる。後ろのブロックは、余白・空き時間に吸収されなかった分だけ押し出される。
- * - 余白ブロックは遅れを吸収する: 前の終了時刻から始まり、計画上の終了時刻まで続く（最短 MIN_BUFFER_MIN）。
+ * - 固定時刻ブロックの開始は固定時刻そのもの。手前のブロックは、固定時刻から逆算した最遅の開始時刻
+ *   （固定時刻 − 余裕 − 移動時間 − 滞在）を超えないよう、計画上の開始より前倒しで動く。
+ *   間に合わないときは fixed-missed（不足分は lateByMin）を付ける。
+ * - 遅延は最初の未開始ブロックの開始を delayMin 遅らせる。余白ブロックが先に縮んで吸収する。
+ * - 「疲れた」の休憩（label: rest）は保護され、長さを変えない。
  * - スキップ済み・臨時休業のブロックは時間を消費しない（表示用の元の時刻は残す）。
- * - 営業時間外・終了時刻超過は block.issues に付ける。
  */
 export function recomputeDay(day: Day, ctx: PlanningContext, opts: RecomputeOptions = {}): Day {
   const mode = opts.mode ?? "preserve";
   const now = opts.nowMin;
-  let pendingDelay = opts.delayMin ?? 0;
-  let cursor = day.startMin;
-  let loc: LatLng = day.origin;
-  let carry = 0;
-  const blocks: Block[] = [];
+  const margin = opts.marginMin ?? DEFAULT_MARGIN_MIN;
+  const travelFn = dayTravel(day, ctx);
+  const src = day.blocks;
+  const n = src.length;
+  const started = (b: Block) => now !== undefined && b.startMin <= now;
 
-  for (const b of day.blocks) {
-    const spot = b.spotId ? ctx.spotById.get(b.spotId) : undefined;
+  // 1. 順序だけで決まる移動（前の場所 → この場所）
+  const travelIn: (TravelEstimate | undefined)[] = new Array(n).fill(undefined);
+  let loc: LatLng = day.origin;
+  for (let i = 0; i < n; i++) {
+    const b = src[i];
+    if (isInert(b)) continue;
+    const p = placeOf(b, ctx);
+    if (!p) continue;
+    travelIn[i] = travelFn(loc, p);
+    loc = p;
+  }
+
+  // 2. 固定時刻からの逆算: 各ブロックの最遅の開始時刻
+  const latestStart: (number | undefined)[] = new Array(n).fill(undefined);
+  let nextLatest: number | undefined;
+  let nextTravel = 0;
+  for (let i = n - 1; i >= 0; i--) {
+    const b = src[i];
+    if (isInert(b)) continue;
+    if (b.fixed) {
+      nextLatest = b.fixed.timeMin - margin;
+      nextTravel = travelIn[i]?.minutes ?? 0;
+      latestStart[i] = nextLatest;
+      continue;
+    }
+    if (nextLatest === undefined) continue;
+    const duration = b.label === "buffer" ? MIN_BUFFER_MIN : b.durationMin;
+    latestStart[i] = nextLatest - nextTravel - duration;
+    nextLatest = latestStart[i];
+    nextTravel = travelIn[i]?.minutes ?? 0;
+  }
+
+  // 3. 先頭から時刻を割り当てる
+  let cursor = day.startMin;
+  let carry = 0;
+  let pending = opts.delayMin ?? 0;
+  let afterEnd = false;
+  const out: Block[] = [];
+
+  for (let i = 0; i < n; i++) {
+    const b = src[i];
 
     if (isInert(b)) {
       if (b.notBefore !== undefined) carry = Math.max(carry, b.notBefore);
-      blocks.push({ ...b, issues: b.closed ? ["closed"] : undefined, crowdedOverlap: false });
+      out.push({ ...b, issues: b.closed ? ["closed"] : undefined, lateByMin: undefined, crowdedOverlap: false });
       continue;
     }
 
-    const started = now !== undefined && b.startMin <= now;
-    if (started) {
-      blocks.push(b);
+    if (started(b)) {
+      out.push(b);
       cursor = Math.max(cursor, b.endMin);
-      if (spot) loc = spot;
+      if (b.fixed?.endsDay) afterEnd = true;
       continue;
     }
 
-    const travel = spot ? ctx.travel(loc, spot) : undefined;
+    const spot = b.spotId ? ctx.spotById.get(b.spotId) : undefined;
+    const travel = travelIn[i];
     const arrival = cursor + (travel?.minutes ?? 0);
     let notBefore = Math.max(b.notBefore ?? 0, carry);
     carry = 0;
+    const withTravel: Block = {
+      ...b,
+      travelMin: travel?.minutes ?? 0,
+      travelMode: travel?.mode ?? "none",
+      travelDistanceM: travel?.distanceM,
+    };
 
-    if (!spot) {
-      // 余白: 前の終了時刻から始まり、遅れた分だけ縮んで計画上の終了時刻に合わせる
-      let start = Math.max(cursor, notBefore);
-      if (pendingDelay > 0) {
-        start += pendingDelay;
-        notBefore = start;
-        pendingDelay = 0;
+    // 固定時刻ブロック: 開始は固定時刻のまま。手前から間に合うかだけを見る
+    if (b.fixed) {
+      const T = b.fixed.timeMin;
+      let arr = Math.max(arrival, notBefore);
+      if (pending > 0) {
+        arr += pending;
+        notBefore = arr;
+        pending = 0;
       }
-      const end =
-        mode === "compact"
-          ? start + b.durationMin
-          : Math.max(b.plannedEndMin ?? b.endMin, start + MIN_BUFFER_MIN);
-      blocks.push({
-        ...b,
+      const shortfall = Math.max(0, arr + margin - T);
+      const issues: BlockIssue[] = [];
+      if (shortfall > 0) issues.push("fixed-missed");
+      if (afterEnd) issues.push("after-last-transport");
+      out.push({
+        ...withTravel,
+        startMin: T,
+        endMin: T + b.durationMin,
+        notBefore: notBefore > 0 ? notBefore : undefined,
+        issues: issues.length ? issues : undefined,
+        lateByMin: shortfall > 0 ? shortfall : undefined,
+        crowdedOverlap: false,
+      });
+      cursor = Math.max(T, arr) + b.durationMin;
+      if (b.fixed.endsDay) afterEnd = true;
+      continue;
+    }
+
+    // 場所のない時間ブロック（余白・場所を決めない休憩）
+    if (!placeOf(b, ctx)) {
+      let start = Math.max(cursor, notBefore);
+      if (pending > 0) {
+        start += pending;
+        notBefore = start;
+        pending = 0;
+      }
+      let end: number;
+      if (b.label === "rest" || mode === "compact") {
+        end = start + b.durationMin;
+      } else {
+        // 余白: 前の終了時刻から始まり、遅れた分だけ縮んで計画上の終了時刻に合わせる。固定時刻が近いときはさらに縮む
+        end = Math.max(b.plannedEndMin ?? b.endMin, start + MIN_BUFFER_MIN);
+        const ls = latestStart[i];
+        if (ls !== undefined) end = Math.max(start + MIN_BUFFER_MIN, Math.min(end, ls + MIN_BUFFER_MIN));
+      }
+      out.push({
+        ...withTravel,
         startMin: start,
         endMin: end,
         travelMin: 0,
         travelMode: "none",
+        travelDistanceM: undefined,
         notBefore: notBefore > 0 ? notBefore : undefined,
         issues: undefined,
+        lateByMin: undefined,
+        crowdedOverlap: false,
       });
       cursor = end;
       continue;
     }
 
+    // スポットのブロック
+    const spotHere = spot!;
     let start = Math.max(arrival, notBefore);
-    if (mode === "preserve") start = Math.max(start, b.plannedStartMin ?? b.startMin);
-    if (pendingDelay > 0) {
-      // 遅延は、次の予定への到着を遅らせる（その後の再計算でも残るよう notBefore に記録する）
-      start += pendingDelay;
+    if (mode === "preserve") {
+      const planned = b.plannedStartMin ?? b.startMin;
+      const ls = latestStart[i];
+      start = Math.max(start, ls !== undefined ? Math.min(planned, ls) : planned);
+    }
+    if (pending > 0) {
+      start += pending;
       notBefore = start;
-      pendingDelay = 0;
+      pending = 0;
     }
 
     const issues: BlockIssue[] = [];
-    const slot = findOpenSlot(spot, day.date, start, b.durationMin);
+    let late: number | undefined;
+    const slot = findOpenSlot(spotHere, day.date, start, b.durationMin);
     if (slot && slot.start - start <= MAX_WAIT_FOR_OPENING_MIN) start = slot.start;
-    else issues.push("outside-hours");
-
+    else {
+      issues.push("outside-hours");
+      late = hoursLateBy(spotHere, day.date, start, b.durationMin);
+    }
     const end = start + b.durationMin;
     if (end > day.endMin) issues.push("over-day-end");
+    if (afterEnd) issues.push("after-last-transport");
 
-    blocks.push({
-      ...b,
+    out.push({
+      ...withTravel,
       startMin: start,
       endMin: end,
-      travelMin: travel!.minutes,
-      travelMode: travel!.mode,
       notBefore: notBefore > 0 ? notBefore : undefined,
       issues: issues.length ? issues : undefined,
-      crowdedOverlap: overlapsCrowded(spot, start, end),
+      lateByMin: late,
+      crowdedOverlap: overlapsCrowded(spotHere, start, end),
     });
     cursor = end;
-    loc = spot;
   }
 
-  return { ...day, blocks };
+  return { ...day, blocks: out };
 }
 
-/** 現在の時刻を計画上の時刻として確定する（生成直後・並べ替え後に呼ぶ）。遅延の記録はクリアされる */
+/** 現在の時刻を計画上の時刻として確定する（生成直後・並べ替え後・確定後に呼ぶ）。遅延の記録はクリアされる */
 export function commitBaseline(day: Day): Day {
   return {
     ...day,
@@ -135,90 +257,4 @@ export function commitBaseline(day: Day): Day {
       notBefore: undefined,
     })),
   };
-}
-
-/** 営業時間（または臨時休業）に間に合わない＝実行できない見込みのブロックか */
-function failsHours(b: Block): boolean {
-  return !isInert(b) && !!b.issues?.includes("outside-hours");
-}
-
-function failsAny(b: Block): boolean {
-  return !isInert(b) && !!b.issues?.some((i) => i === "outside-hours" || i === "over-day-end");
-}
-
-/** 1日の終了予定時刻をこれだけ超えるまでは「許容範囲」とみなす（分） */
-export const DAY_END_TOLERANCE_MIN = 30;
-
-export interface SkipAnalysisOptions {
-  nowMin: number;
-}
-
-/**
- * スキップ候補の判定（当日モード用）。再計算済みの Day を渡す。
- *
- * 1. 営業時間や終了時刻に間に合わない Optional ブロック → スキップ候補
- * 2. 営業時間に間に合わない、または終了予定時刻を大きく（30分超）超える Must / 標準ブロックがあるときは、
- *    手前の Optional を飛ばせば改善するかを試算し、改善する Optional を（近い順に）スキップ候補にする
- * 「それでも行く」（keepAnyway）が付いたブロックは候補にしない。
- */
-export function markSkipCandidates(day: Day, ctx: PlanningContext, opts: SkipAnalysisOptions): Day {
-  const started = (b: Block) => b.startMin <= opts.nowMin;
-  let blocks = day.blocks.map((b): Block => (b.skip === "candidate" ? { ...b, skip: undefined } : b));
-  const candidates = new Set<string>();
-
-  // 1. それ自体が間に合わない Optional
-  for (const b of blocks) {
-    if (b.label === "optional" && !b.keepAnyway && !started(b) && failsAny(b)) candidates.add(b.id);
-  }
-
-  // 2. 手前の Optional を飛ばせば、後ろの Must / 標準が間に合うようになるか
-  const simulate = (skipIds: Set<string>): Day =>
-    recomputeDay(
-      {
-        ...day,
-        blocks: blocks.map((b) => (skipIds.has(b.id) ? { ...b, skip: "skipped" as const } : b)),
-      },
-      ctx,
-      { mode: "preserve", nowMin: opts.nowMin },
-    );
-  const overrun = (b: Block) => Math.max(0, b.endMin - (day.endMin + DAY_END_TOLERANCE_MIN));
-  const isCore = (b: Block) => b.label !== "optional" && !started(b) && !isInert(b);
-  /** 大きいほど悪い: 営業時間に間に合わない予定は重く、終了予定時刻の超過は超過分（分）で数える */
-  const badness = (d: Day) =>
-    d.blocks.filter(isCore).reduce((n, b) => n + (failsHours(b) ? 10000 : 0) + overrun(b), 0);
-
-  let sim = simulate(candidates);
-  let bad = badness(sim);
-  while (bad > 0) {
-    const firstBadIdx = sim.blocks.findIndex((b) => isCore(b) && (failsHours(b) || overrun(b) > 0));
-    const pool = blocks
-      .map((b, i) => ({ b, i }))
-      .filter(
-        ({ b, i }) =>
-          i < firstBadIdx && b.label === "optional" && !b.keepAnyway && !started(b) && !isInert(b) && !candidates.has(b.id),
-      )
-      .reverse(); // 問題のブロックに近いものから
-    let improved = false;
-    for (const { b } of pool) {
-      const trial = simulate(new Set([...candidates, b.id]));
-      if (badness(trial) < bad) {
-        candidates.add(b.id);
-        sim = trial;
-        bad = badness(trial);
-        improved = true;
-        break;
-      }
-    }
-    if (!improved) break;
-  }
-
-  blocks = blocks.map((b) => (candidates.has(b.id) ? { ...b, skip: "candidate" as const } : b));
-  return { ...day, blocks };
-}
-
-/** 再計算＋スキップ候補判定。today モードなら nowMin を渡す */
-export function settleDay(day: Day, ctx: PlanningContext, opts: RecomputeOptions = {}): Day {
-  const recomputed = recomputeDay(day, ctx, opts);
-  if (opts.nowMin === undefined) return recomputed;
-  return markSkipCandidates(recomputed, ctx, { nowMin: opts.nowMin });
 }

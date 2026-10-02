@@ -40,6 +40,8 @@ export interface Spot extends LatLng {
   /** 定休日（0=日 … 6=土） */
   closedDays?: number[];
   stayMin: number;
+  /** 時間が足りないときに短縮できる下限（分）。未指定は stayMin の半分（15分未満にはしない） */
+  minStayMin?: number;
   priceLevel: PriceLevel;
   crowded?: TimeRange[];
   /** 1〜3。知名度。興味に合わなくても定番を混ぜるために使う */
@@ -70,8 +72,13 @@ export interface Preferences {
 
 /* ---------- 旅程 ---------- */
 
-/** must: 絶対に行きたい / normal: 標準 / optional: 余力があれば / buffer: 余白（休憩・自由時間） */
-export type BlockLabel = "must" | "normal" | "optional" | "buffer";
+/**
+ * 再計画のときの優先順位: fixed（固定時刻）> must > rest / buffer（休憩・余白）> optional。
+ * normal（標準）は Optional と Must の中間として扱う。
+ *   fixed: 固定時刻（終電・予約など。動かせない）/ must: 絶対に行きたい / normal: 標準
+ *   optional: 余力があれば / buffer: 余白（遅れを吸収する自由時間）/ rest: 「疲れた」で入れた休憩（保護される）
+ */
+export type BlockLabel = "fixed" | "must" | "normal" | "optional" | "buffer" | "rest";
 export type TravelMode = "walk" | "transit" | "none";
 
 export interface PlanB {
@@ -82,14 +89,47 @@ export interface PlanB {
   durationMin: number;
 }
 
-export type BlockIssue = "outside-hours" | "over-day-end" | "closed";
+/**
+ * outside-hours: 営業時間に収まらない / over-day-end: 1日の終了予定時刻を超える / closed: 臨時休業
+ * fixed-missed: 固定時刻に間に合わない / after-last-transport: 最終便のあとに予定が残っている
+ */
+export type BlockIssue = "outside-hours" | "over-day-end" | "closed" | "fixed-missed" | "after-last-transport";
+
+/* ---------- 固定時刻・メンバー ---------- */
+
+export type FixedKind = "last-transport" | "checkin" | "reservation" | "car-return" | "meetup";
+
+export interface Member {
+  id: string;
+  name: string;
+}
+
+/** 固定時刻（絶対に守る時刻）。全員に効くものは旅程のブロックに、特定メンバーだけのものは Day.memberFixed に入る */
+export interface FixedEvent {
+  id: string;
+  kind: FixedKind;
+  /** 例: 「太宰府駅 18:05 の電車（最終）」 */
+  title: string;
+  /** 固定時刻（0:00 からの分）。この時刻にその場所にいる／出発する */
+  timeMin: number;
+  dayIndex: number;
+  place: Origin;
+  /** 場所がスポットのとき（予約など） */
+  spotId?: string;
+  /** その場所での所要時間（交通は 0） */
+  durationMin: number;
+  /** 帰りの最終便など。これに乗ったらその日の予定は終わり */
+  endsDay: boolean;
+  /** 対象メンバー。null は全員 */
+  memberIds: string[] | null;
+}
 
 export interface Block {
   id: string;
   label: BlockLabel;
   /** 余白ブロックでは undefined */
   spotId?: string;
-  /** 滞在（余白は休憩）時間（分） */
+  /** 滞在（余白は休憩）時間（分）。時間が足りないときは最低滞在時間まで短縮される */
   durationMin: number;
   /** 現在の開始・終了時刻（遅延などで再計算された値） */
   startMin: number;
@@ -97,9 +137,10 @@ export interface Block {
   /** もともとの計画上の開始・終了時刻。再計算で「これより早くは始めない」基準にする */
   plannedStartMin?: number;
   plannedEndMin?: number;
-  /** 直前の場所からの移動時間（分） */
+  /** 直前の場所からの移動時間（分）と道のり（m） */
   travelMin: number;
   travelMode: TravelMode;
+  travelDistanceM?: number;
   /**
    * Plan B。
    * undefined: 不要（屋内・余白） / null: 探したが見つからない / PlanB: あり。
@@ -107,16 +148,20 @@ export interface Block {
    */
   planB?: PlanB | null;
   switched?: boolean;
-  skip?: "candidate" | "skipped";
-  /** スキップ候補になっても「それでも行く」を選んだ */
-  keepAnyway?: boolean;
+  skip?: "skipped";
   /** 臨時休業 */
   closed?: boolean;
   /** 進行中ブロックを切り替えたとき、これより前には始められない */
   notBefore?: number;
   issues?: BlockIssue[];
+  /** issues があるときの不足分（分）。固定時刻に何分足りないか、閉店を何分超えるか */
+  lateByMin?: number;
   /** 混雑しやすい時間帯に重なっている */
   crowdedOverlap?: boolean;
+  /** 固定時刻ブロック（label が fixed）。全員に効く固定時刻 */
+  fixed?: FixedEvent;
+  /** スポットではない場所（駅・宿など）。固定時刻ブロックや、場所を決めない休憩で使う */
+  place?: Origin;
 }
 
 export interface Origin extends LatLng {
@@ -132,6 +177,15 @@ export interface Day {
   origin: Origin;
   blocks: Block[];
   warnings: string[];
+  /** 特定のメンバーだけの固定時刻（旅程全体の時刻には影響しない） */
+  memberFixed?: FixedEvent[];
+  /** 「かなり疲れた」以降は、徒歩を短く見積もる */
+  lowWalking?: boolean;
+}
+
+export interface ItinerarySettings {
+  /** 固定時刻の余裕時間（分）。出発すべき時刻 = 固定時刻 − 移動時間 − 余裕時間 */
+  marginMin: number;
 }
 
 export interface Itinerary {
@@ -142,6 +196,8 @@ export interface Itinerary {
   prefs: Preferences;
   days: Day[];
   closedSpotIds: string[];
+  members: Member[];
+  settings: ItinerarySettings;
 }
 
 /* ---------- 外部データ（adapter から注入） ---------- */

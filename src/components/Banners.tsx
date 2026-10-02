@@ -1,6 +1,8 @@
 "use client";
 
+import type { DepartureNotice } from "@/core/fixed";
 import { formatHHMM } from "@/core/time";
+import type { RestSuggestion } from "@/core/walking";
 import type { Block, PlanningContext } from "@/core/types";
 import type { RainImpact, RainOverride } from "@/core/weather";
 import type { PlanBCandidate } from "@/core/planb";
@@ -130,41 +132,59 @@ export function ClosureBanner({
   );
 }
 
-/** スキップ候補の通知 */
-export function SkipBanner({
-  blocks,
-  ctx,
-  onSkipAll,
-  onKeep,
+/** 出発すべき時刻の30分前・10分前の通知（固定時刻） */
+export function DepartureBanner({ notice, onDismiss }: { notice: DepartureNotice; onDismiss: () => void }) {
+  const urgent = notice.level !== "before30";
+  const over = notice.level === "over";
+  return (
+    <section
+      className={`animate-pop-in rounded-2xl border-2 p-4 shadow-md ${over ? "border-rose-500 bg-rose-50" : urgent ? "border-orange-500 bg-orange-50" : "border-amber-400 bg-amber-50"}`}
+      role="alert"
+      data-testid="departure-banner"
+      data-level={notice.level}
+    >
+      <h2 className="text-[15px] font-extrabold text-slate-900" data-testid="departure-banner-title">
+        {over ? "🚨 出発すべき時刻を過ぎています" : notice.level === "before10" ? "⏰ 出発の10分前になりました" : "⏰ 出発の30分前になりました"}
+      </h2>
+      <p className="mt-0.5 text-[13px] text-slate-800">
+        {notice.who ? `${notice.who}は ` : ""}
+        <strong>{formatHHMM(notice.departBy)}</strong> までに出発しないと、{notice.title} に間に合いません
+        {!over && `（あと${notice.minutesLeft}分）`}
+      </p>
+      <button type="button" onClick={onDismiss} className="mt-2 min-h-9 text-xs font-semibold text-slate-600 underline" data-testid="departure-dismiss">
+        確認しました
+      </button>
+    </section>
+  );
+}
+
+/** 歩行距離が目安を超えそうなときの休憩の提案 */
+export function WalkBanner({
+  suggestion,
+  nextName,
+  onAccept,
+  onDismiss,
 }: {
-  blocks: Block[];
-  ctx: PlanningContext;
-  onSkipAll: () => void;
-  onKeep: (id: string) => void;
+  suggestion: RestSuggestion;
+  nextName: string;
+  onAccept: () => void;
+  onDismiss: () => void;
 }) {
   return (
-    <section className="animate-pop-in rounded-2xl border-2 border-amber-400 bg-amber-50 p-4 shadow-md" role="alert" data-testid="skip-banner">
-      <h2 className="text-[15px] font-extrabold text-amber-950">⏭ 間に合わない予定があります（スキップ候補）</h2>
-      <p className="mt-0.5 text-xs text-amber-900">Optional の予定を飛ばすと、残りの予定を守れます。</p>
-      <ul className="mt-2 space-y-1.5 rounded-xl bg-white/80 p-2.5">
-        {blocks.map((b) => (
-          <li key={b.id} className="flex items-center gap-2 text-[13px]">
-            <span className="flex-1">
-              <span className="font-bold tabular-nums text-slate-700">{formatHHMM(b.startMin)}</span>{" "}
-              <span className="font-semibold text-slate-900">{ctx.spotById.get(b.spotId!)?.name}</span>
-              <span className="block text-[11px] text-amber-800">
-                {b.issues?.includes("outside-hours") ? "営業時間に間に合いません" : "予定の終了時刻を超えます"}
-              </span>
-            </span>
-            <button type="button" onClick={() => onKeep(b.id)} className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700">
-              それでも行く
-            </button>
-          </li>
-        ))}
-      </ul>
-      <Button variant="amber" className="mt-3 h-auto w-full whitespace-normal py-2.5 text-center" onClick={onSkipAll} data-testid="skip-all">
-        候補をすべてスキップして立て直す
-      </Button>
+    <section className="animate-pop-in rounded-2xl border-2 border-teal-400 bg-teal-50 p-4 shadow-md" role="alert" data-testid="walk-banner">
+      <h2 className="text-[15px] font-extrabold text-teal-950">🚶 歩行距離が目安を超えそうです</h2>
+      <p className="mt-0.5 text-xs text-teal-900">
+        「{nextName}」まで行くと、今日の推定歩行は約{(suggestion.projectedM / 1000).toFixed(1)}km（目安 {(suggestion.limitM / 1000).toFixed(0)}km）になります。
+      </p>
+      <p className="mt-1 text-[13px] font-bold text-slate-900">次の予定の前に休憩を入れますか？</p>
+      <div className="mt-3 grid gap-2">
+        <Button onClick={onAccept} data-testid="walk-accept" className="bg-teal-600 hover:bg-teal-700">
+          休憩を入れる案を見る（30分）
+        </Button>
+        <button type="button" onClick={onDismiss} className="min-h-9 text-xs font-semibold text-teal-800 underline" data-testid="walk-dismiss">
+          あとで
+        </button>
+      </div>
     </section>
   );
 }

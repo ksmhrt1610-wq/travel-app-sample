@@ -3,10 +3,13 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { BlockDetailSheet } from "@/components/BlockDetailSheet";
+import { FixedTimesPanel, MembersCard } from "@/components/FixedTimesPanel";
+import { ProposalCard } from "@/components/ProposalCard";
 import { ShareDialog } from "@/components/ShareDialog";
 import { Timeline } from "@/components/Timeline";
-import { Button, Chip, cx, LABEL_STYLE, useToast } from "@/components/ui";
-import { reorderBlocks, switchBlock } from "@/core/actions";
+import { Button, Chip, cx, LABEL_STYLE, Sheet, useToast } from "@/components/ui";
+import { canReorder, reorderBlocks } from "@/core/actions";
+import { absenceByBlock, memberFixedStatuses } from "@/core/fixed";
 import {
   BLOCK_LABEL,
   BUDGET_LABEL,
@@ -17,10 +20,18 @@ import {
 } from "@/core/labels";
 import { needsPlanB } from "@/core/planb";
 import { planBWarnings } from "@/core/planner";
+import { describeEvent, isQuietChange, replan, type ReplanEvent, type ReplanResult } from "@/core/replan";
 import { formatDateJa } from "@/core/time";
-import type { BlockLabel, Itinerary } from "@/core/types";
+import type { BlockLabel, Itinerary, Member } from "@/core/types";
 import { useTrip } from "@/store/tripStore";
 import { usePlanningContext } from "@/store/usePlanningContext";
+
+interface Proposal {
+  event: ReplanEvent;
+  title: string;
+  result: ReplanResult;
+  removeMustIds: string[];
+}
 
 export default function ItineraryPage() {
   const ctx = usePlanningContext();
@@ -29,6 +40,7 @@ export default function ItineraryPage() {
   const [dayIdx, setDayIdx] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
+  const [proposal, setProposal] = useState<Proposal | null>(null);
   const toast = useToast();
 
   const day = itinerary?.days[Math.min(dayIdx, (itinerary?.days.length ?? 1) - 1)];
@@ -38,7 +50,7 @@ export default function ItineraryPage() {
     const blocks = itinerary.days.flatMap((d) => d.blocks);
     const outdoor = blocks.filter((b) => needsPlanB(b, ctx));
     return {
-      spots: blocks.filter((b) => b.spotId).length,
+      spots: blocks.filter((b) => b.spotId && !b.fixed).length,
       outdoor: outdoor.length,
       covered: outdoor.filter((b) => b.planB).length,
     };
@@ -65,14 +77,50 @@ export default function ItineraryPage() {
     if (message) toast.show(message);
   };
 
+  /** 再計画エンジンの提案を作る。確定するまで旅程は変わらない */
+  const propose = (event: ReplanEvent, removeMustIds: string[] = []) => {
+    const result = replan(itinerary, event, ctx, { dayIndex: day.index, removeMustIds });
+    const title = describeEvent(event, ctx, itinerary);
+    if (isQuietChange(result)) {
+      commit(result.after, "反映しました");
+      return;
+    }
+    setProposal({ event, title, result, removeMustIds });
+  };
+
   const handleReorder = (from: number, to: number) => {
     commit(reorderBlocks(itinerary, day.index, from, to, ctx), "並べ替えて、時刻を計算し直しました");
+  };
+
+  const move = (id: string, dir: -1 | 1) => {
+    const from = day.blocks.findIndex((b) => b.id === id);
+    const to = from + dir;
+    const check = canReorder(day, from, to);
+    if (!check.ok) {
+      if (check.reason) toast.show(check.reason);
+      return;
+    }
+    handleReorder(from, to);
+  };
+
+  const changeMembers = (members: Member[]) => {
+    const ids = new Set(members.map((m) => m.id));
+    commit({
+      ...itinerary,
+      members,
+      days: itinerary.days.map((d) => ({
+        ...d,
+        memberFixed: d.memberFixed?.map((f) => ({ ...f, memberIds: f.memberIds?.filter((id) => ids.has(id)) ?? null })).filter((f) => !f.memberIds || f.memberIds.length > 0),
+      })),
+    });
   };
 
   const selected = selectedId ? day.blocks.find((b) => b.id === selectedId) ?? null : null;
   const warnings = [...day.warnings, ...planBWarnings(day, ctx)];
   const p = itinerary.prefs;
-  const labelCounts = (["must", "normal", "optional", "buffer"] as BlockLabel[]).map((l) => ({
+  const margin = itinerary.settings.marginMin;
+  const absence = absenceByBlock(memberFixedStatuses(day, ctx, margin, itinerary.members));
+  const labelCounts = (["fixed", "must", "normal", "optional", "rest", "buffer"] as BlockLabel[]).map((l) => ({
     label: l,
     n: day.blocks.filter((b) => b.label === l).length,
   }));
@@ -137,6 +185,11 @@ export default function ItineraryPage() {
         </div>
       )}
 
+      <div className="mt-3 space-y-3">
+        <MembersCard members={itinerary.members} onChange={changeMembers} />
+        <FixedTimesPanel itinerary={itinerary} ctx={ctx} dayIndex={day.index} onPropose={(e) => propose(e)} />
+      </div>
+
       {warnings.length > 0 && (
         <div className="mt-3 space-y-1.5 rounded-2xl border border-amber-300 bg-amber-50 p-3" role="alert" data-testid="warnings">
           {warnings.map((w) => (
@@ -155,10 +208,10 @@ export default function ItineraryPage() {
               {BLOCK_LABEL[l.label]} {l.n}
             </Chip>
           ))}
-        <span className="ml-auto text-[11px] text-slate-500">右端の ⠿ をドラッグで並べ替え</span>
+        <span className="ml-auto text-[11px] text-slate-500">右端の ⠿ をドラッグで並べ替え（🔒は動かせません）</span>
       </div>
 
-      <Timeline day={day} ctx={ctx} onOpen={setSelectedId} onReorder={handleReorder} />
+      <Timeline day={day} ctx={ctx} onOpen={setSelectedId} onReorder={handleReorder} onBlocked={(r) => toast.show(r)} members={itinerary.members} marginMin={margin} />
 
       <div className="mt-4 grid gap-2">
         <Link
@@ -166,7 +219,7 @@ export default function ItineraryPage() {
           data-testid="go-today"
           className="flex min-h-12 items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 text-base font-semibold text-white hover:bg-slate-800"
         >
-          ⏱️ 当日モードを試す（雨・遅延のシミュレーション）
+          ⏱️ 当日モードを試す（雨・遅延・疲れたのシミュレーション）
         </Link>
         <Link href="/" className="text-center text-sm font-semibold text-brand-700 underline">
           条件を変えてつくり直す
@@ -180,15 +233,35 @@ export default function ItineraryPage() {
         day={day}
         ctx={ctx}
         mode="edit"
+        marginMin={margin}
+        absent={selected ? absence.get(selected.id) : undefined}
         onSwitch={(id) => {
-          commit(switchBlock(itinerary, id, ctx), "Plan B の切り替えを反映しました");
+          setSelectedId(null);
+          propose({ type: "plan-b", blockIds: [id] });
         }}
-        onMove={(id, dir) => {
-          const from = day.blocks.findIndex((b) => b.id === id);
-          const to = from + dir;
-          if (to >= 0 && to < day.blocks.length) handleReorder(from, to);
+        onRemoveFixed={(id) => {
+          setSelectedId(null);
+          propose({ type: "fixed-remove", fixedId: id });
         }}
+        onMove={move}
       />
+
+      <Sheet open={!!proposal} onClose={() => setProposal(null)} title="組み直し案" testId="proposal-sheet">
+        {proposal && (
+          <ProposalCard
+            result={proposal.result}
+            ctx={ctx}
+            title={proposal.title}
+            onConfirm={() => {
+              commit(proposal.result.after, "確定して、旅程に反映しました");
+              setProposal(null);
+            }}
+            onCancel={() => setProposal(null)}
+            onRemoveMust={(blockId) => propose(proposal.event, [...proposal.removeMustIds, blockId])}
+          />
+        )}
+      </Sheet>
+
       <ShareDialog open={shareOpen} onClose={() => setShareOpen(false)} itinerary={itinerary} />
       {toast.node}
     </div>

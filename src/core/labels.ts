@@ -1,4 +1,4 @@
-import type { Area, BlockLabel, Budget, Companions, Duration, InterestCategory, Pace, PriceLevel, RainTolerance, Setting, TravelMode } from "./types";
+import type { Area, BlockLabel, Budget, Companions, Duration, FixedKind, InterestCategory, Pace, PriceLevel, RainTolerance, Setting, TravelMode } from "./types";
 
 export const CATEGORY_LABEL: Record<InterestCategory, string> = {
   gourmet: "グルメ",
@@ -49,10 +49,28 @@ export const PRICE_LABEL: Record<PriceLevel, string> = {
 };
 
 export const BLOCK_LABEL: Record<BlockLabel, string> = {
+  fixed: "固定",
   must: "Must",
   normal: "標準",
   optional: "Optional",
   buffer: "余白",
+  rest: "休憩",
+};
+
+export const FIXED_KIND_LABEL: Record<FixedKind, string> = {
+  "last-transport": "帰りの交通（終電・最終バス）",
+  checkin: "宿のチェックイン",
+  reservation: "予約（飲食店・体験）",
+  "car-return": "レンタカー返却",
+  meetup: "集合",
+};
+
+export const FIXED_KIND_ICON: Record<FixedKind, string> = {
+  "last-transport": "🚆",
+  checkin: "🏨",
+  reservation: "🍽️",
+  "car-return": "🚗",
+  meetup: "🙋",
 };
 
 export const DURATION_LABEL: Record<Duration, string> = { day: "日帰り", overnight: "1泊2日" };
