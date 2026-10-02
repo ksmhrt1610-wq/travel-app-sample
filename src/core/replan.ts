@@ -4,7 +4,7 @@ import { templateWriter, type Cause, type ExplanationWriter } from "./cause";
 import { diffItineraries, type DiffItem } from "./diff";
 import { createFixedBlock, isGroupWide, nextId } from "./fixed";
 import { haversineM, taxiMinutesFor, transitMinutesFor, walkMinutesFor } from "./geo";
-import { BUFFER_FLOOR_MIN, MEAL_ADJUST_WINDOW, MEAL_LABEL } from "./meals";
+import { BUFFER_FLOOR_MIN, dietOk, MEAL_ADJUST_WINDOW, MEAL_LABEL } from "./meals";
 import { attachPlanBs } from "./planb";
 import { MEAL_WINDOW } from "./planner";
 import {
@@ -21,7 +21,7 @@ import {
 } from "./schedule";
 import { suggestForGap, type Suggestion } from "./suggest";
 import { dayWalking } from "./walking";
-import type { Block, BlockIssue, Day, FixedEvent, Itinerary, LatLng, MealSlot, PlanningContext, Spot } from "./types";
+import type { Block, BlockIssue, Day, DietaryRestriction, FixedEvent, Itinerary, LatLng, MealSlot, PlanningContext, Spot } from "./types";
 
 /**
  * 再計画エンジン。
@@ -564,6 +564,8 @@ interface SettleEnv {
   closed: Set<string>;
   /** 「かなり疲れた」: 近い順への並べ替えをする */
   reorder: boolean;
+  /** 食事制限。食事の店を差し替えるときも、すべての制限に対応できる店だけを選ぶ */
+  dietary?: readonly DietaryRestriction[];
 }
 
 interface Settled {
@@ -687,6 +689,7 @@ function settle(start: Day, env: SettleEnv): Settled {
       if (!orig) continue;
       for (const c of ctx.spots) {
         if (used.has(c.id) || !c.mealSlots?.includes(b.meal) || haversineM(orig, c) > MEAL_REPLACE_RADIUS_M) continue;
+        if (!dietOk(c, env.dietary)) continue;
         const durationMin = Math.max(minStayOf(c), Math.min(b.durationMin, c.stayMin));
         const trial = rc({
           ...day,
@@ -1033,6 +1036,7 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
     otherUsed,
     closed: new Set(work.closedSpotIds),
     reorder: tiredPlan?.heavy === true,
+    dietary: work.prefs.dietary,
   };
 
   /** イベントを適用した日を、再計算 → 調整 まで進める。ユーザーが確認して外すことにした Must・食事もここで外す */

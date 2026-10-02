@@ -12,6 +12,7 @@ import type {
   Budget,
   Companions,
   Day,
+  DietaryRestriction,
   Duration,
   FixedEvent,
   FixedKind,
@@ -44,7 +45,7 @@ type DayTuple = [number, number, number, BlockTuple[], string[], FixedTuple[], n
 type Payload = [
   number, // version
   string, // startDate
-  [Duration, Companions, Budget, InterestCategory[], Pace, RainTolerance, string[]],
+  [Duration, Companions, Budget, InterestCategory[], Pace, RainTolerance, string[], DietaryRestriction[]?],
   string[], // closedSpotIds
   DayTuple[],
   [string, string][], // members
@@ -89,7 +90,8 @@ export function encodeItinerary(itin: Itinerary): string {
   const payload: Payload = [
     VERSION,
     itin.startDate,
-    [p.duration, p.companions, p.budget, p.interests, p.pace, p.rainTolerance, p.mustSpotIds],
+    // 食事制限は、あるときだけ末尾に足す（旧形式のリンクもそのまま読める）
+    [p.duration, p.companions, p.budget, p.interests, p.pace, p.rainTolerance, p.mustSpotIds, ...(p.dietary?.length ? [p.dietary] : [])] as Payload[2],
     itin.closedSpotIds,
     itin.days.map((d): DayTuple => [
       d.startMin,
@@ -203,6 +205,7 @@ const payloadS = z.tuple([
     z.enum(["relaxed", "normal", "packed"]),
     z.enum(["no-outdoor", "light-rain-ok", "dont-care"]),
     z.array(idS).max(LIMITS.mustSpots),
+    z.array(z.enum(["no-pork", "no-seafood", "no-wheat", "vegetarian"])).max(4).optional(),
   ]),
   z.array(idS).max(LIMITS.closedSpots),
   z.array(dayTupleS).min(1).max(LIMITS.days),
@@ -263,6 +266,7 @@ export function decodeItineraryResult(token: string, ctx: PlanningContext): Shar
       pace: pref[4],
       rainTolerance: pref[5],
       mustSpotIds: pref[6],
+      ...(pref[7]?.length ? { dietary: pref[7] } : {}),
     };
     for (const sid of [...prefs.mustSpotIds, ...closedSpotIds]) {
       if (!ctx.spotById.has(sid)) return fail("unknown-spot", `存在しないスポットが含まれています（${sid}）`);

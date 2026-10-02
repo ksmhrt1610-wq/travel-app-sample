@@ -11,7 +11,7 @@ const COMPANION_BONUS: Record<Companions, Partial<Record<InterestCategory, numbe
 };
 
 /** 雨への許容度による屋外スポットの減点（屋外NGでも「除外」はせず、Plan B 前提で入れられる） */
-const RAIN_PENALTY: Record<RainTolerance, Record<Setting, number>> = {
+export const RAIN_PENALTY: Record<RainTolerance, Record<Setting, number>> = {
   "no-outdoor": { indoor: 0, semi: 1.0, outdoor: 2.0 },
   "light-rain-ok": { indoor: 0, semi: 0, outdoor: 0.5 },
   "dont-care": { indoor: 0, semi: 0, outdoor: 0 },

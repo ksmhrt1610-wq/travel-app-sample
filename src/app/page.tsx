@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { DEMO_PREFERENCES, PreferenceForm } from "@/components/PreferenceForm";
@@ -40,6 +41,19 @@ export default function HomePage() {
           旅程を作る時点で、屋外の予定ごとに<strong>屋内の Plan B</strong>を用意。当日に雨や遅延が起きたら通知して、ワンタップで切り替えます。
         </p>
       </section>
+
+      <Link
+        href="/group"
+        data-testid="group-entry"
+        className="mb-3 flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 shadow-sm hover:bg-emerald-100"
+      >
+        <span className="text-2xl" aria-hidden>👥</span>
+        <span className="flex-1">
+          <span className="block text-[15px] font-bold text-emerald-900">グループで計画する</span>
+          <span className="block text-xs text-emerald-800">2〜6人の希望を集めて、3つの案から投票で決めます</span>
+        </span>
+        <span className="text-emerald-700" aria-hidden>›</span>
+      </Link>
 
       {ready && ctx ? (
         <>

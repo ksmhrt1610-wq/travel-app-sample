@@ -1,4 +1,5 @@
 import type { HourlyWeather } from "@/core/weather";
+import type { GroupState } from "@/core/group";
 import type { LatLng, Spot, TravelEstimator } from "@/core/types";
 
 /**
@@ -25,8 +26,29 @@ export interface TransitProvider {
   createEstimator(points: LatLng[]): Promise<TravelEstimator>;
 }
 
+/** 読み込みの結果。読めなかったデータは勝手に捨てず、issue として返す（確認のうえで、削除かバックアップ） */
+export interface GroupLoadResult {
+  state: GroupState | null;
+  issue?: { reason: string };
+}
+
+export type GroupSaveResult = { ok: true } | { ok: false; reason: string };
+
+/**
+ * グループの保存先。今は端末の localStorage（1台を回して使う）。
+ * 複数端末の同期をするときは、これを実装したサーバー経由のものに差し替える（アプリ本体は、この interface だけに依存する）。
+ */
+export interface GroupRepository {
+  load(): Promise<GroupLoadResult>;
+  /** 保存の前に検証する。不正なデータは保存せず、理由を返す */
+  save(state: GroupState): Promise<GroupSaveResult>;
+  /** 削除する。backup: true なら、読めなかったデータをバックアップとして残してから削除する */
+  clear(opts?: { backup?: boolean }): Promise<void>;
+}
+
 export interface Adapters {
   spots: SpotProvider;
   weather: WeatherProvider;
   transit: TransitProvider;
+  groups: GroupRepository;
 }

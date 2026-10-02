@@ -699,6 +699,143 @@ try {
   await page.waitForURL(`${BASE}/`);
   check("「データを初期化」で、保存データがすべて消える", (await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("replan-fukuoka")).length)) === 0);
   consoleErrors.length = 0; // この手順で起こした例外のログは、わざと起こしたもの
+  consoleErrors.length = 0; // この手順で起こした例外のログは、わざと起こしたもの
+
+  /* ====================================================================
+   * シナリオG: グループ（4人の希望を集めて、3案 → 投票 → 確定）
+   * ==================================================================== */
+
+  step("G1. トップからグループ画面へ。メンバー4人・主催者・候補日を入れる");
+  await page.evaluate(() => localStorage.clear());
+  await page.goto(BASE);
+  await page.waitForSelector(q("group-entry"));
+  await page.click(q("group-entry"));
+  await page.waitForURL("**/group");
+  await page.waitForSelector(q("group-setup"));
+  check("メンバーは最初2人。2人未満には減らせない（外すボタンがない）", (await page.locator('[data-testid^="group-name-"]').count()) === 2 && (await page.locator('button[aria-label^="メンバー"][aria-label$="を外す"]').count()) === 0);
+  check("入力が空のあいだは、始められない", await page.isDisabled(q("group-create")));
+  await page.click(q("group-add-member"));
+  await page.click(q("group-add-member"));
+  const NAMES = ["あおい", "ゆうと", "みさき", "けん"];
+  for (let i = 0; i < 4; i++) await page.fill(q(`group-name-${i}`), NAMES[i]);
+  check("メンバーは6人まで（7人目は追加できない）", await (async () => {
+    await page.click(q("group-add-member"));
+    await page.click(q("group-add-member"));
+    const six = (await page.locator('[data-testid^="group-name-"]').count()) === 6 && (await page.locator(q("group-add-member")).count()) === 0;
+    for (let k = 0; k < 2; k++) await page.click('button[aria-label="メンバー6を外す"], button[aria-label="メンバー5を外す"]');
+    return six;
+  })());
+  check("候補日は2〜4日", (await page.locator('[data-testid^="group-date-"]').count()) === 2);
+  await page.click(q("group-create"));
+  await page.waitForSelector(q("group-answers"));
+  check("回答の進み具合が出る（0/4人）", (await text("group-progress")).includes("0/4"));
+  check("案を作るボタンは、2人以上が回答するまで押せない", await page.isDisabled(q("group-make-plans")));
+
+  step("G2. 1台を回して、4人が順に入力（予算・好み・行きたい場所）。他の人の予算・苦手は、一覧に出ない");
+  const answer = async (id, o) => {
+    await page.click(q(`group-answer-${id}`));
+    await page.waitForSelector(q("member-form"));
+    await page.click(q(`member-budget-${o.budget}`));
+    await page.click(q(`member-rain-${o.rain}`));
+    await page.click(q(`member-pace-${o.pace}`));
+    for (const [cat, vote] of Object.entries(o.interests ?? {})) await page.click(q(`member-interest-${cat}-${vote}`));
+    for (const [i, spot] of (o.wishes ?? []).entries()) await page.selectOption(q(`member-wish-${i}`), spot);
+    await page.click(q("member-submit"));
+    await page.waitForSelector(q("group-answers"));
+  };
+  await answer("m1", { budget: 8000, rain: "light-rain-ok", pace: "normal", interests: { gourmet: "like", nature: "dislike" }, wishes: ["nakasu-ichiran"] });
+  check("1人回答すると 1/4人になる", (await text("group-progress")).includes("1/4"));
+  await answer("m2", { budget: 15000, rain: "dont-care", pace: "packed", interests: { nature: "like", history: "like" }, wishes: ["ohori-park", "hakata-kushida"] });
+  await answer("m3", { budget: 10000, rain: "no-outdoor", pace: "normal", interests: { cafe: "like", art: "like" }, wishes: ["ohori-art", "ohori-park"] });
+  const listText = await text("group-answers");
+  check("回答の一覧に、予算の金額・苦手は出ない（回答済みの表示だけ）", !/15,000|10,000|8,000|15000|苦手/.test(listText) && listText.includes("✓ 回答済み"));
+  check("3/4人が回答", (await text("group-progress")).includes("3/4"));
+  check("未回答の人がいても、2人以上なら「除いて案を作る」が押せる", !(await page.isDisabled(q("group-make-plans"))) && (await text("group-make-plans")).includes("けん"));
+  await answer("m4", { budget: 12000, rain: "light-rain-ok", pace: "relaxed" });
+  check("4/4人が回答して、「3つの案を作る」になる", (await text("group-progress")).includes("4/4") && (await text("group-make-plans")).includes("3つの案"));
+  // 回答を直すときは、本人確認の表示が出てから、本人の入力（予算）が見える
+  await page.click(q("group-reanswer-m1"));
+  check("回答を直すときは、先に確認が出る", (await page.locator(q("reanswer-confirm")).count()) === 1 && !(await page.locator(q("member-form")).count()));
+  await page.click(q("group-reanswer-ok-m1"));
+  await page.waitForSelector(q("member-form"));
+  check("本人の入力画面では、自分の予算・苦手が見える", (await page.inputValue(q("member-budget"))) === "8000" && (await page.getAttribute(q("member-interest-nature-dislike"), "aria-checked")) === "true");
+  await page.click(q("member-cancel"));
+  await page.waitForSelector(q("group-answers"));
+
+  step("G3. 調整ポイントと、3つの案（満足度・誰の希望か）");
+  await page.click(q("group-make-plans"));
+  await page.waitForSelector(q("group-results"), { timeout: 30000 });
+  const adj = await text("group-adjustments");
+  check("調整ポイント: 予算は最小の ¥8,000、雨は屋外NG、ペースは偶数で割れず「普通」", adj.includes("¥8,000") && adj.includes("屋外NG") && adj.includes("「普通」"));
+  check("調整ポイント: 希望が重なった「大濠公園」が必ず行く場所に、あおいさんの希望も入る", adj.includes("大濠公園") && adj.includes("ゆうと・みさき") && adj.includes("一蘭"));
+  const resultsText = await text("group-results");
+  check("結果の画面に、他の人の予算額は出ない。調整ポイントに苦手なカテゴリ（自然）も出ない", !/15,000|12,000|10,000/.test(resultsText) && !adj.includes("自然"));
+  check("3つの案（バランス・合計いちばん・移動いちばん少ない）が並ぶ", (await page.locator('[data-testid^="plan-card-"]').count()) === 3);
+  for (const k of ["balanced", "max-sum", "least-travel"]) {
+    check(`${k}: メンバー4人ぶんの満足度（0〜100）が出る`, (await page.locator(`[data-testid^="sat-${k}-"]`).count()) === 4);
+  }
+  const minOf = async (k) => Number(await text(`plan-min-${k}`));
+  check("バランス案の最低満足度は、合計いちばん案の最低満足度以上", (await minOf("balanced")) >= (await minOf("max-sum")));
+  const satText = (await Promise.all(["balanced", "max-sum", "least-travel"].map(async (k) => (await page.locator(`[data-testid^="sat-${k}-"]`).allTextContents()).join(" ")))).join(" ");
+  check("満足度の理由に、苦手なカテゴリ名（自然）や「苦手」は出ない", !/自然|苦手/.test(satText), satText.slice(0, 120));
+  const requested = await page.locator(`${q("plan-card-balanced")} [data-testid^="requested-balanced-"] span`).count();
+  check("予定に「誰の希望か」のアイコンが付く", requested >= 3);
+  check("食事（ランチ・ディナー）が旅程に入っている", (await text("plan-card-balanced")).includes("ランチ") && (await text("plan-card-balanced")).includes("ディナー"));
+  check("希望が大きく割れていない（警告は出ない）", (await page.locator(q("group-split")).count()) === 0);
+  await shot("group-results");
+
+  step("G4. 投票: 全員が投票するまで結果は見えない。同票なら主催者の票で決まる");
+  const voteAs = async (id, kind) => {
+    await page.click(q(`vote-as-${id}`));
+    await page.click(q(`vote-pick-${kind}`));
+  };
+  await voteAs("m1", "max-sum");
+  check("1人投票すると 1/4人", (await text("vote-progress")).includes("1/4"));
+  check("投票した人は、もう投票者の選択肢に出ない", (await page.locator(q("vote-as-m1")).count()) === 0);
+  await voteAs("m2", "max-sum");
+  await voteAs("m3", "balanced");
+  check("全員が投票するまで、結果は出ない", (await page.locator(q("vote-result")).count()) === 0);
+  await voteAs("m4", "balanced");
+  await page.waitForSelector(q("vote-winner"));
+  check("同票（2対2）は、主催者（あおい）の票の「合計いちばん案」に決まる", (await page.getAttribute(q("vote-winner"), "data-kind")) === "max-sum" && (await text("vote-winner")).includes("主催者の票"));
+  check("決まったあとに、各案の得票が出る", (await text("plan-votes-max-sum")).includes("2票") && (await text("plan-votes-balanced")).includes("2票"));
+  await page.click(q("vote-reset"));
+  check("投票をやり直せる", (await text("vote-progress")).includes("0/4") && (await page.locator(q("vote-result")).count()) === 0);
+  await voteAs("m1", "least-travel");
+  await voteAs("m2", "balanced");
+  await voteAs("m3", "balanced");
+  await voteAs("m4", "max-sum");
+  await page.waitForSelector(q("vote-winner"));
+  check("過半数の案（バランス案）が、そのまま決まる", (await page.getAttribute(q("vote-winner"), "data-kind")) === "balanced");
+
+  step("G5. 確定すると、ふつうの旅程になる（当日モードも使える）");
+  await page.click(q("confirm-plan"));
+  await page.waitForURL("**/itinerary");
+  await page.waitForSelector(q("timeline"));
+  check("旅程画面に、選んだ案の予定が出る（大濠公園・一蘭が入っている）", (await text("timeline")).includes("大濠公園") && (await text("timeline")).includes("一蘭"));
+  check("旅程の保存データには、個人の予算・苦手・回答が入らない", await page.evaluate(() => {
+    const raw = localStorage.getItem("replan-fukuoka:v3") ?? "";
+    return !/dislike|budgetCapYen|availableDates|wantedSpotIds|15000|12000/.test(raw);
+  }));
+  const shareUrl = await (async () => {
+    await page.click(q("share-button"));
+    await page.waitForSelector(q("share-url"));
+    return page.inputValue(q("share-url"));
+  })();
+  const sharePayload = Buffer.from(new URL(shareUrl).searchParams.get("s").replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+  check("共有リンクの中身にも、他の人の予算額・苦手は含まれない", !/dislike|like|budget|15000|12000|10000|8000/.test(sharePayload));
+  await page.goto(`${BASE}/today`);
+  await page.waitForSelector(q("timeline"));
+  check("当日モードで、確定した旅程を開ける", (await page.locator(q("block-spot")).count()) >= 2);
+
+  step("G6. グループの保存データが壊れていても、確認が出る（勝手に消さない）");
+  await page.evaluate(() => localStorage.setItem("replan-fukuoka:group:v1", "{壊れたグループ"));
+  await page.goto(`${BASE}/group`);
+  await page.waitForSelector(q("group-load-issue"));
+  check("読めないグループの保存データは、確認が出る。確認前は消えない", (await page.evaluate(() => localStorage.getItem("replan-fukuoka:group:v1"))) === "{壊れたグループ");
+  await page.click(q("group-issue-backup"));
+  await page.waitForSelector(q("group-setup"));
+  check("「バックアップに残して始める」で、退避して新しく始められる", (await page.evaluate(() => localStorage.getItem("replan-fukuoka:group:backup"))) === "{壊れたグループ" && (await page.evaluate(() => localStorage.getItem("replan-fukuoka:group:v1"))) === null);
 } catch (e) {
   failures++;
   console.error("\n✗ シナリオ中にエラー:", e.message);

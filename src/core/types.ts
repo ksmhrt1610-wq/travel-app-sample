@@ -16,6 +16,8 @@ export type Setting = "indoor" | "outdoor" | "semi";
 export type PriceLevel = 0 | 1 | 2 | 3; // 0:無料 1:〜1,000円 2:〜3,000円 3:それ以上
 export type Area = "tenjin" | "hakata" | "nakasu" | "ohori" | "momochi" | "dazaifu";
 export type MealSlot = "lunch" | "dinner";
+/** 食事制限。豚肉なし／魚介なし／小麦なし／ベジタリアン */
+export type DietaryRestriction = "no-pork" | "no-seafood" | "no-wheat" | "vegetarian";
 
 /** "HH:MM"（閉店が日付をまたぐ場合は "24:00" まで許容） */
 export interface TimeRange {
@@ -52,6 +54,8 @@ export interface Spot extends LatLng {
   snack?: boolean;
   /** 屋内で座って休める場所（カフェ・商業施設・博物館など）。「疲れた」の休憩場所の候補になる */
   restable: boolean;
+  /** 食事向けのスポットが対応できる食事制限（サンプルの仮データ。実際の対応は店に確認）。未指定は、どの制限にも対応しない */
+  accommodates?: DietaryRestriction[];
   /** データについての補足（店名・営業時間・位置が概算など）。画面にも出す */
   dataNote?: string;
   description: string;
@@ -74,6 +78,8 @@ export interface Preferences {
   rainTolerance: RainTolerance;
   /** 「絶対に行きたい場所」 */
   mustSpotIds: string[];
+  /** 食事制限（グループの全員分の和集合）。あれば、食事はすべての制限に対応できる店だけから選ぶ */
+  dietary?: DietaryRestriction[];
 }
 
 /* ---------- 旅程 ---------- */
@@ -266,6 +272,10 @@ export interface GenerateInput {
     optimizeRoute?: boolean;
     /** 1日の歩行距離をペース別の目安の85%以内に収める */
     limitWalking?: boolean;
+    /** スポットごとの加点・減点（グループの好みなど）。省略時は 0。食事の店選びにも効く */
+    spotBias?: (spot: Spot) => number;
+    /** 移動・エリアの行き来にかかる減点の倍率（省略時 1）。大きいほど、近場でまとまる */
+    travelPenaltyScale?: number;
   };
 }
 

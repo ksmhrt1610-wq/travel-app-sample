@@ -1,5 +1,6 @@
 import { findOpenSlot } from "./availability";
 import { haversineM } from "./geo";
+import { mealDietOk } from "./meals";
 import { minStayOf } from "./replan";
 import { dayTravel, isInert, isStarted, placeOf } from "./schedule";
 import type { Block, Itinerary, LatLng, PlanningContext, Spot } from "./types";
@@ -49,6 +50,7 @@ export function nearbyOpenSpots(
   const out: DetourCandidate[] = [];
   for (const sp of ctx.spots) {
     if (used.has(sp.id)) continue;
+    if (!mealDietOk(sp, itin.prefs.dietary)) continue; // 食事制限に対応できない店は、候補に出さない
     const d = haversineM(here, sp);
     if (d > (opts.radiusM ?? DETOUR_RADIUS_M)) continue;
     const arrive = opts.nowMin + travel(here, sp).minutes;

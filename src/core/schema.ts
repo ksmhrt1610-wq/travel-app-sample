@@ -41,6 +41,7 @@ const travelMode = z.enum(["walk", "transit", "none"]);
 const blockIssue = z.enum(["outside-hours", "over-day-end", "closed", "fixed-missed", "after-last-transport", "outside-meal-window"]);
 const fixedKind = z.enum(["last-transport", "checkin", "reservation", "car-return", "meetup"]);
 const mealSlot = z.enum(["lunch", "dinner"]);
+const dietary = z.enum(["no-pork", "no-seafood", "no-wheat", "vegetarian"]);
 
 /* ---------- 部品 ---------- */
 
@@ -115,6 +116,7 @@ const preferences = z.object({
   pace: z.enum(["relaxed", "normal", "packed"]),
   rainTolerance: z.enum(["no-outdoor", "light-rain-ok", "dont-care"]),
   mustSpotIds: z.array(id).max(LIMITS.mustSpots),
+  dietary: z.array(dietary).max(4).optional(),
 });
 
 export const itinerarySchema = z.object({

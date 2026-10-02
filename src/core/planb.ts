@@ -1,6 +1,7 @@
 import { findOpenSlot, overlapsCrowded } from "./availability";
 import { haversineM } from "./geo";
 import { CATEGORY_LABEL, travelLabel } from "./labels";
+import { mealDietOk } from "./meals";
 import { BUDGET_COMFORT, categoryAffinity, SCORE_WEIGHTS } from "./scoring";
 import type { Block, Itinerary, PlanB, PlanningContext, Preferences, Spot } from "./types";
 
@@ -70,6 +71,7 @@ export function findPlanBCandidates(
     if (c.id === original.id) continue;
     if (opts.excludeIds?.has(c.id)) continue;
     if (requireIndoor && c.setting !== "indoor") continue;
+    if (!mealDietOk(c, prefs?.dietary)) continue; // 食事向けの店は、食事制限に対応できるものだけ
 
     const distanceM = haversineM(original, c);
     if (distanceM > maxDist) continue;

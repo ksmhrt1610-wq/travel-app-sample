@@ -3,7 +3,7 @@ import { addDays } from "./time";
 import { attachPlanBs, needsPlanB } from "./planb";
 import { baseScore, SCORE_WEIGHTS } from "./scoring";
 import { defaultMembers } from "./fixed";
-import { BUFFER_FLOOR_MIN, MEAL_ADJUST_WINDOW } from "./meals";
+import { BUFFER_FLOOR_MIN, DIET_LABEL, DIET_ORDER, dietOk, MEAL_ADJUST_WINDOW } from "./meals";
 import { improveRoute } from "./route";
 import { commitBaseline, DEFAULT_MARGIN_MIN, isInert, recomputeDay } from "./schedule";
 import { dayWalking, legWalkingM, onSiteWalkingM, WALK_LIMIT_KM } from "./walking";
@@ -96,6 +96,12 @@ const MEAL_WALK_RESERVE_M = 300;
 /** すでに今日行ったエリアへ戻るときの減点（エリアを行き来しないように） */
 const AREA_REVISIT_PENALTY = 2.0;
 const MEAL_AREA_REVISIT_PENALTY = 1.0;
+
+/** グループ向けの調整（3案を作り分けるために使う。省略時は何もしない） */
+interface PlanTuning {
+  spotBias?: (spot: Spot) => number;
+  travelPenaltyScale?: number;
+}
 
 /** 食事に出かけてよい移動時間の上限（Must 以外） */
 const MEAL_MAX_TRAVEL_MIN = 35;
@@ -225,7 +231,14 @@ function planDay(
   used: Set<string>,
   walkPenalty = 0,
   walkBudgetM = Number.POSITIVE_INFINITY,
+  tune: PlanTuning = {},
 ): { blocks: Block[]; warnings: string[]; missingMeals: number; missingMusts: number } {
+  const bias = tune.spotBias ?? (() => 0);
+  const travelScale = tune.travelPenaltyScale ?? 1;
+  const travelPenalty = TRAVEL_PENALTY_PER_MIN * travelScale;
+  /** 食事制限があるとき、見つからなかった食事の警告に、制限の名前を入れる */
+  const dietNote = prefs.dietary?.length ? `（${DIET_ORDER.filter((d) => prefs.dietary!.includes(d)).map((d) => DIET_LABEL[d]).join("・")}に対応できる店）` : "";
+  const mealMissingWarning = (meal: MealSlot) => `${meal === "lunch" ? "ランチ" : "ディナー"}に使える営業中の店${dietNote}が見つかりませんでした。`;
   const warnings: string[] = [];
   const mustIds = new Set(dayMusts.map((s) => s.id));
   const cap = Math.max(pace.maxSpots, dayMusts.length);
@@ -318,22 +331,26 @@ function planDay(
     let best: { spot: Spot; ev: Eval; v: number } | null = null;
     for (const spot of ctx.spots) {
       if (used.has(spot.id) || !spot.mealSlots?.includes(slot)) continue;
+      // 食事制限: 全員の制限に対応できる店だけを選ぶ（Must の店でも例外にしない）
+      if (!dietOk(spot, prefs.dietary)) continue;
       const ev = evaluate(ctx, def.date, spot, t, loc, {
         earliest: w.earliest,
         latestStart: w.latest,
         // 食事は、食事の窓（MEAL_ADJUST_WINDOW）の終わりまでに食べ終わること
         dayEnd: Math.min(def.endMin, MEAL_ADJUST_WINDOW[slot].latest),
-        maxWait,
+        // 行きたい店（Must）は、開店まで長めに待ってでも、食事の枠で使う（別の店で食事を済ませてしまわないように）
+        // （食事の窓の中で開く店なので、待ちの長さは窓が決める。待ち時間は余白になる）
+        maxWait: mustIds.has(spot.id) ? Number.POSITIVE_INFINITY : maxWait,
         maxTravel: mustIds.has(spot.id) ? undefined : MEAL_MAX_TRAVEL_MIN,
         stay: stayOf(spot),
       });
       if (!ev) continue;
       // 食事は枠まで待つのが自然なので、待ち時間の減点はごく小さくする
-      let v = baseScore(spot, prefs) - TRAVEL_PENALTY_PER_MIN * ev.travel.minutes - 0.005 * ev.wait - walkCost(spot, ev);
+      let v = baseScore(spot, prefs) + bias(spot) - travelPenalty * ev.travel.minutes - 0.005 * ev.wait - walkCost(spot, ev);
       if (mustIds.has(spot.id)) v += SCORE_WEIGHTS.must;
       if (overlapsCrowded(spot, ev.start, ev.end)) v -= 0.4;
       if (spot.area === lastArea) v += SAME_AREA_BONUS;
-      else if (visitedAreas.has(spot.area)) v -= MEAL_AREA_REVISIT_PENALTY;
+      else if (visitedAreas.has(spot.area)) v -= MEAL_AREA_REVISIT_PENALTY * travelScale;
       if (slot === "dinner" && spot.mealSlots.length === 1) v += 2.0; // 夜だけの体験（屋台など）
       if (!best || v > best.v + 1e-9) best = { spot, ev, v };
     }
@@ -350,6 +367,9 @@ function planDay(
       if (used.has(spot.id)) continue;
       const isMust = mustIds.has(spot.id);
       if (spot.mealSlots && !isMust) continue; // 食事向けスポットは食事枠で使う
+      // 行きたい店（Must の食事向けスポット）も、食事の枠が残っているあいだは食事として使う（朝にラーメンだけ食べに寄る、にならないように）
+      if (spot.mealSlots && isMust && spot.mealSlots.some((m) => mealPending[m])) continue;
+      if (spot.mealSlots && !dietOk(spot, prefs.dietary)) continue; // 食事制限に対応できない店は、Must でも入れない
       const ev = evaluate(ctx, def.date, spot, t, loc, {
         dayEnd: def.endMin,
         maxWait: isMust ? MUST_MAX_WAIT : pace.maxWait,
@@ -360,13 +380,13 @@ function planDay(
       if (pendingMeal && ev.end + 10 > MEAL_WINDOW[pendingMeal].latest) continue; // 食事の時間を押さない
       // 歩行の予算: これまでの歩行 + このスポット + これから行く食事の分 が予算に収まること（Must は除く）
       if (!isMust && walkedM + walkOf(spot, ev) + pendingMealCount() * MEAL_WALK_RESERVE_M > walkBudgetM) continue;
-      let v = baseScore(spot, prefs);
+      let v = baseScore(spot, prefs) + bias(spot);
       v -= SCORE_WEIGHTS.categoryRepeat * (catCount.get(spot.category) ?? 0);
-      v -= TRAVEL_PENALTY_PER_MIN * ev.travel.minutes + WAIT_PENALTY_PER_MIN * ev.wait + walkCost(spot, ev);
+      v -= travelPenalty * ev.travel.minutes + WAIT_PENALTY_PER_MIN * ev.wait + walkCost(spot, ev);
       if (overlapsCrowded(spot, ev.start, ev.end)) v -= 0.8;
       v += timeFit(spot, ev.start);
       if (spot.area === lastArea) v += SAME_AREA_BONUS;
-      else if (visitedAreas.has(spot.area)) v -= AREA_REVISIT_PENALTY;
+      else if (visitedAreas.has(spot.area)) v -= AREA_REVISIT_PENALTY * travelScale;
       if (!hasOutdoor && prefs.rainTolerance !== "no-outdoor" && ev.start < 17 * 60) {
         if (spot.setting === "outdoor") v += OUTDOOR_VARIETY_BONUS;
         else if (spot.setting === "semi") v += SEMI_VARIETY_BONUS;
@@ -398,7 +418,7 @@ function planDay(
       if (!tryMeal(meal, MEAL_SHORT_WAIT_MIN)) {
         mealPending[meal] = false;
         missingMeals++;
-        warnings.push(`${meal === "lunch" ? "ランチ" : "ディナー"}に使える営業中の店が見つかりませんでした。`);
+        warnings.push(mealMissingWarning(meal));
       }
       maybeRest();
       continue;
@@ -422,7 +442,7 @@ function planDay(
       if (tryMeal(meal, Number.POSITIVE_INFINITY)) { maybeRest(); continue; }
       mealPending[meal] = false;
       missingMeals++;
-        warnings.push(`${meal === "lunch" ? "ランチ" : "ディナー"}に使える営業中の店が見つかりませんでした。`);
+      warnings.push(mealMissingWarning(meal));
       continue;
     }
     break;
@@ -488,6 +508,7 @@ export const generateItinerary: ItineraryGenerator = (input: GenerateInput): Iti
       const usedTry = new Set(used);
       const { blocks, warnings, missingMeals, missingMusts } = planDay(
         def, ctx, prefs, pace, perDay[def.index], userMustIds, usedTry, penalty, budgetRatio * walkTargetM,
+        { spotBias: input.options?.spotBias, travelPenaltyScale: input.options?.travelPenaltyScale },
       );
       let day: Day = {
         index: def.index,
@@ -544,6 +565,14 @@ export const generateItinerary: ItineraryGenerator = (input: GenerateInput): Iti
   };
   return attachPlanBs(itin, ctx);
 };
+
+/** その日に入るはずの食事（ランチ・ディナー）のうち、旅程に入っていない数。生成の条件（planDay の食事枠）と同じ基準で数える */
+export function missingMealCount(day: Day): number {
+  const lunchExpected = day.startMin < MEAL_WINDOW.lunch.latest && day.endMin > MEAL_WINDOW.lunch.earliest + 60;
+  const dinnerExpected = day.endMin >= MEAL_WINDOW.dinner.latest;
+  const has = (slot: MealSlot) => day.blocks.some((b) => b.meal === slot && b.skip !== "skipped" && !b.closed);
+  return (lunchExpected && !has("lunch") ? 1 : 0) + (dinnerExpected && !has("dinner") ? 1 : 0);
+}
 
 /** Plan B が見つからなかった屋外ブロックの警告文（表示のたびに現在の旅程から導出する） */
 export function planBWarnings(day: Day, ctx: PlanningContext): string[] {
