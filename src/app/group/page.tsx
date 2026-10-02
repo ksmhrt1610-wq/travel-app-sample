@@ -7,7 +7,7 @@ import { GroupResults } from "@/components/group/GroupResults";
 import { GroupSetup } from "@/components/group/GroupSetup";
 import { MemberForm } from "@/components/group/MemberForm";
 import { Button } from "@/components/ui";
-import type { DecidedBy, GroupPlan, GroupPlanKind } from "@/core/group";
+import { sampleGroup, type DecidedBy, type GroupPlan, type GroupPlanKind } from "@/core/group";
 import { saveTrip } from "@/store/tripStore";
 import { useGroup } from "@/store/groupStore";
 import { usePlanningContext } from "@/store/usePlanningContext";
@@ -65,7 +65,18 @@ export default function GroupPage() {
         </section>
       )}
 
-      {!g.group && !g.issue && <GroupSetup onCreate={async (n) => { await g.create(n); setView({ name: "answers" }); }} error={g.saveError} />}
+      {!g.group && !g.issue && <GroupSetup
+          onCreate={async (n) => {
+            await g.create(n);
+            setView({ name: "answers" });
+          }}
+          onSample={async () => {
+            const { inputs, ...rest } = sampleGroup();
+            await g.create(rest, inputs);
+            setView({ name: "answers" });
+          }}
+          error={g.saveError}
+        />}
 
       {g.group && view.name === "answers" && (
         <GroupAnswers

@@ -12,7 +12,7 @@ const defaultDates = (): string[] => {
 };
 
 /** 準備: メンバー（2〜6人）・主催者・候補日（2〜4日） */
-export function GroupSetup({ onCreate, error }: { onCreate: (g: NewGroup) => void; error?: string | null }) {
+export function GroupSetup({ onCreate, onSample, error }: { onCreate: (g: NewGroup) => void; onSample?: () => void; error?: string | null }) {
   const [names, setNames] = useState<string[]>(["", ""]);
   const [organizer, setOrganizer] = useState(0);
   const [dates, setDates] = useState<string[]>(defaultDates);
@@ -37,6 +37,16 @@ export function GroupSetup({ onCreate, error }: { onCreate: (g: NewGroup) => voi
         submit();
       }}
     >
+      {onSample && (
+        <section className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 shadow-sm">
+          <h2 className="text-[15px] font-bold text-emerald-900">まず触ってみる</h2>
+          <p className="mb-2 text-xs text-emerald-800">4人ぶんの回答が入ったサンプル（グルメ好き・自然が苦手・予算がばらばら…）で、まとめ・3つの案・投票を試せます。</p>
+          <Button variant="emerald" className="w-full" onClick={onSample} data-testid="group-sample">
+            サンプルで試す（4人ぶん入力済み）
+          </Button>
+        </section>
+      )}
+
       <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
         <h2 className="text-[15px] font-bold text-slate-900">メンバー（{GROUP_LIMITS.minMembers}〜{GROUP_LIMITS.maxMembers}人）</h2>
         <p className="mb-2 text-xs text-slate-500">1台のスマホを順番に回して、1人ずつ希望を入力します。主催者は、同票のときに決める人です。</p>

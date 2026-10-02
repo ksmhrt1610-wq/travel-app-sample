@@ -909,6 +909,14 @@ try {
   await page.click(q("group-issue-backup"));
   await page.waitForSelector(q("group-setup"));
   check("「バックアップに残して始める」で、退避して新しく始められる", (await page.evaluate(() => localStorage.getItem("replan-fukuoka:group:backup"))) === "{壊れたグループ" && (await page.evaluate(() => localStorage.getItem("replan-fukuoka:group:v1"))) === null);
+
+  step("G7. 「サンプルで試す」: 4人ぶん入力済みで始まり、すぐに3つの案が見られる");
+  await page.click(q("group-sample"));
+  await page.waitForSelector(q("group-answers"));
+  check("4/4人が回答済みで始まる", (await text("group-progress")).includes("4/4") && (await text("group-make-plans")).includes("3つの案"));
+  await page.click(q("group-make-plans"));
+  await page.waitForSelector(q("group-results"), { timeout: 30000 });
+  check("調整ポイントと3つの案が出る", (await text("group-adjustments")).includes("¥8,000") && (await page.locator('[data-testid^="plan-card-"]').count()) === 3);
 } catch (e) {
   failures++;
   console.error("\n✗ シナリオ中にエラー:", e.message);

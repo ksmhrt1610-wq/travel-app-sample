@@ -53,7 +53,7 @@ export function useGroup() {
   );
 
   const create = useCallback(
-    async (g: NewGroup): Promise<boolean> => {
+    async (g: NewGroup, inputs: MemberInput[] = []): Promise<boolean> => {
       const now = new Date();
       const next: GroupState = {
         version: 1,
@@ -62,7 +62,7 @@ export function useGroup() {
         organizerId: g.organizerId,
         members: g.members,
         candidateDates: g.candidateDates,
-        inputs: {},
+        inputs: Object.fromEntries(inputs.map((i) => [i.memberId, i])),
         votes: {},
       };
       const r = await repo.save(next);
