@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { buildShareUrl } from "@/core/share";
+import { encodeItineraryChecked } from "@/core/share";
 import type { Itinerary } from "@/core/types";
 import { Button, Sheet } from "./ui";
 
@@ -9,10 +9,13 @@ import { Button, Sheet } from "./ui";
 export function ShareDialog({ open, onClose, itinerary, title }: { open: boolean; onClose: () => void; itinerary: Itinerary; title?: string }) {
   const [copied, setCopied] = useState(false);
   const [canNativeShare, setCanNativeShare] = useState(false);
-  const url = useMemo(
-    () => (open && typeof window !== "undefined" ? buildShareUrl(window.location.origin, itinerary) : ""),
-    [open, itinerary],
-  );
+  const built = useMemo(() => {
+    if (!open || typeof window === "undefined") return null;
+    const r = encodeItineraryChecked(itinerary);
+    return r.ok ? { url: `${window.location.origin}/share?s=${r.token}`, error: null } : { url: "", error: r.reason };
+  }, [open, itinerary]);
+  const url = built?.url ?? "";
+  const tooLarge = built?.error ?? null;
 
   useEffect(() => {
     setCanNativeShare(typeof navigator !== "undefined" && typeof navigator.share === "function");
@@ -37,6 +40,11 @@ export function ShareDialog({ open, onClose, itinerary, title }: { open: boolean
       <p className="mb-2 text-sm text-slate-600">
         このリンクを開いた人は、同じ旅程を<strong>閲覧</strong>できます（共同編集はできません）。旅程の内容がリンクの中に含まれます。
       </p>
+      {tooLarge && (
+        <p className="mb-2 rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm font-semibold text-rose-900" role="alert" data-testid="share-too-large">
+          {tooLarge}
+        </p>
+      )}
       <textarea
         id="share-url"
         readOnly
@@ -47,17 +55,17 @@ export function ShareDialog({ open, onClose, itinerary, title }: { open: boolean
         data-testid="share-url"
       />
       <div className="mt-3 grid grid-cols-1 gap-2">
-        <Button onClick={copy} data-testid="copy-share">
+        <Button onClick={copy} disabled={!url} data-testid="copy-share">
           {copied ? "✓ コピーしました" : "リンクをコピー"}
         </Button>
-        {canNativeShare && (
+        {canNativeShare && !!url && (
           <Button variant="secondary" onClick={() => navigator.share({ title: "Replan 福岡の旅程", url }).catch(() => {})}>
             アプリで共有…
           </Button>
         )}
-        <a href={url} target="_blank" rel="noopener noreferrer" className="text-center text-xs font-semibold text-brand-700 underline" data-testid="open-share">
+        {url && <a href={url} target="_blank" rel="noopener noreferrer" className="text-center text-xs font-semibold text-brand-700 underline" data-testid="open-share">
           共有ページを新しいタブで確認
-        </a>
+        </a>}
       </div>
     </Sheet>
   );

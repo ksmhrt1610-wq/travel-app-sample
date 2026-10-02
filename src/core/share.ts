@@ -4,6 +4,8 @@ import { haversineM } from "./geo";
 import { describePlanBReason } from "./planb";
 import { DAY_ORIGINS } from "./planner";
 import { DEFAULT_MARGIN_MIN } from "./schedule";
+import { itinerarySchema, LIMITS } from "./schema";
+import { z } from "zod";
 import type {
   Block,
   BlockLabel,
@@ -118,19 +120,98 @@ export function encodeItinerary(itin: Itinerary): string {
   return toBase64Url(JSON.stringify(payload));
 }
 
-/** 共有URL。origin は location.origin、path はアプリ内の共有ページのパス */
-export function buildShareUrl(origin: string, itin: Itinerary, path = "/share"): string {
-  return `${origin}${path}?s=${encodeItinerary(itin)}`;
+export type ShareEncodeResult = { ok: true; token: string } | { ok: false; reason: string };
+
+/** 長さの上限（MAX_SHARE_TOKEN_CHARS）を超えるときは、リンクにせず理由を返す */
+export function encodeItineraryChecked(itin: Itinerary): ShareEncodeResult {
+  const token = encodeItinerary(itin);
+  if (token.length > MAX_SHARE_TOKEN_CHARS) {
+    return { ok: false, reason: `旅程が大きすぎて、共有リンクにできません（上限${MAX_SHARE_TOKEN_CHARS / 1024}KB、いまは約${Math.ceil(token.length / 1024)}KB）` };
+  }
+  return { ok: true, token };
+}
+
+/** 共有URL。origin は location.origin、path はアプリ内の共有ページのパス。上限を超えるときは null */
+export function buildShareUrl(origin: string, itin: Itinerary, path = "/share"): string | null {
+  const r = encodeItineraryChecked(itin);
+  return r.ok ? `${origin}${path}?s=${r.token}` : null;
 }
 
 /* ---------- decode ---------- */
 
-const isNum = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
-const isStr = (x: unknown): x is string => typeof x === "string";
+/** 共有リンクの長さの上限（クエリ文字列。8KB）。これを超えるものは読み込まない */
+export const MAX_SHARE_TOKEN_CHARS = 8 * 1024;
+/** デコード後の JSON の長さの上限 */
+const MAX_PAYLOAD_JSON_CHARS = 64 * 1024;
 
-function tupleToFixed(t: FixedTuple): FixedEvent | null {
+export type ShareErrorCode = "empty" | "too-long" | "malformed" | "version" | "invalid" | "unknown-spot";
+
+export type ShareDecodeResult = { ok: true; itinerary: Itinerary } | { ok: false; code: ShareErrorCode; reason: string };
+
+const idS = z.string().min(1).max(LIMITS.idLen);
+const idOrEmpty = z.string().max(LIMITS.idLen);
+const minuteS = z.number().finite().min(-LIMITS.maxMinute).max(LIMITS.maxMinute);
+const durationS = z.number().finite().min(0).max(24 * 60);
+const flagS = z.number().int().min(0).max(15);
+const bitS = z.number().int().min(0).max(1);
+
+const fixedTupleS = z.tuple([
+  idS,
+  z.enum(["last-transport", "checkin", "reservation", "car-return", "meetup"]),
+  z.string().max(LIMITS.textLen),
+  minuteS,
+  z.number().int().min(0).max(LIMITS.days - 1),
+  z.string().max(LIMITS.nameLen),
+  z.number().finite().min(-90).max(90),
+  z.number().finite().min(-180).max(180),
+  idOrEmpty,
+  durationS,
+  bitS,
+  z.array(idS).max(LIMITS.members).nullable(),
+]);
+
+const blockTupleS = z.tuple([
+  z.string().min(1).max(1),
+  idOrEmpty,
+  minuteS,
+  minuteS,
+  durationS,
+  idOrEmpty,
+  durationS,
+  flagS,
+  fixedTupleS.optional(),
+]);
+
+const dayTupleS = z.tuple([
+  minuteS,
+  minuteS,
+  z.number().int().min(0).max(9),
+  z.array(blockTupleS).max(LIMITS.blocksPerDay),
+  z.array(z.string().max(LIMITS.textLen)).max(LIMITS.warnings),
+  z.array(fixedTupleS).max(LIMITS.fixedPerDay).optional(),
+  bitS.optional(),
+]);
+
+const payloadS = z.tuple([
+  z.union([z.literal(1), z.literal(VERSION)]),
+  z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  z.tuple([
+    z.enum(["day", "overnight"]),
+    z.enum(["solo", "couple", "friends", "family"]),
+    z.enum(["saving", "normal", "luxury"]),
+    z.array(z.enum(["gourmet", "cafe", "history", "nature", "shopping", "art", "nightview"])).max(7),
+    z.enum(["relaxed", "normal", "packed"]),
+    z.enum(["no-outdoor", "light-rain-ok", "dont-care"]),
+    z.array(idS).max(LIMITS.mustSpots),
+  ]),
+  z.array(idS).max(LIMITS.closedSpots),
+  z.array(dayTupleS).min(1).max(LIMITS.days),
+  z.array(z.tuple([idS, z.string().max(30)])).max(LIMITS.members).optional(),
+  z.number().finite().min(0).max(180).optional(),
+]);
+
+function tupleToFixed(t: z.infer<typeof fixedTupleS>): FixedEvent {
   const [id, kind, title, timeMin, dayIndex, placeName, lat, lng, spotId, durationMin, endsDay, memberIds] = t;
-  if (!isStr(id) || !isStr(kind) || !isStr(title) || !isNum(timeMin) || !isNum(dayIndex) || !isStr(placeName) || !isNum(lat) || !isNum(lng) || !isNum(durationMin)) return null;
   return {
     id,
     kind,
@@ -141,19 +222,39 @@ function tupleToFixed(t: FixedTuple): FixedEvent | null {
     spotId: spotId || undefined,
     durationMin,
     endsDay: !!endsDay,
-    memberIds: Array.isArray(memberIds) ? memberIds.filter(isStr) : null,
+    memberIds,
   };
 }
 
-/** 不正なトークン・存在しないスポットを含む場合は null */
-export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary | null {
-  try {
-    const payload = JSON.parse(fromBase64Url(token)) as Payload;
-    if (!Array.isArray(payload) || (payload[0] !== 1 && payload[0] !== VERSION)) return null;
-    const [, startDate, pref, closedSpotIds, dayTuples, memberTuples, marginMin] = payload;
-    if (!isStr(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return null;
-    if (!Array.isArray(pref) || !Array.isArray(dayTuples) || dayTuples.length === 0 || dayTuples.length > 7) return null;
+const fail = (code: ShareErrorCode, reason: string): ShareDecodeResult => ({ ok: false, code, reason });
 
+/**
+ * 共有リンクのトークンを旅程に戻す。例外は投げず、失敗は理由つきで返す。
+ * 長さの上限 → base64url/JSON → スキーマ検証（型・範囲・配列の長さ）→ スポットIDの存在確認 → 組み立てた旅程のスキーマ検証。
+ */
+export function decodeItineraryResult(token: string, ctx: PlanningContext): ShareDecodeResult {
+  if (!token) return fail("empty", "リンクにデータがありません");
+  if (token.length > MAX_SHARE_TOKEN_CHARS) return fail("too-long", `リンクが長すぎます（${MAX_SHARE_TOKEN_CHARS / 1024}KB以内。いまは約${Math.ceil(token.length / 1024)}KB）`);
+  if (!/^[A-Za-z0-9_-]+$/.test(token)) return fail("malformed", "リンクに使えない文字が含まれています");
+
+  let raw: unknown;
+  try {
+    const json = fromBase64Url(token);
+    if (json.length > MAX_PAYLOAD_JSON_CHARS) return fail("too-long", "リンクの内容が大きすぎます");
+    raw = JSON.parse(json);
+  } catch {
+    return fail("malformed", "リンクの形式が壊れています（途中で切れている可能性があります）");
+  }
+  if (Array.isArray(raw) && raw[0] !== 1 && raw[0] !== VERSION) return fail("version", "対応していない形式のリンクです（古い、または新しすぎる可能性があります）");
+
+  const parsed = payloadS.safeParse(raw);
+  if (!parsed.success) {
+    const i = parsed.error.issues[0];
+    return fail("invalid", `リンクの内容が正しくありません（${i.path.join(".") || "全体"}: ${i.message}）`);
+  }
+
+  try {
+    const [, startDate, pref, closedSpotIds, dayTuples, memberTuples, marginMin] = parsed.data;
     const prefs: Preferences = {
       duration: pref[0],
       companions: pref[1],
@@ -163,11 +264,13 @@ export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary 
       rainTolerance: pref[5],
       mustSpotIds: pref[6],
     };
+    for (const sid of [...prefs.mustSpotIds, ...closedSpotIds]) {
+      if (!ctx.spotById.has(sid)) return fail("unknown-spot", `存在しないスポットが含まれています（${sid}）`);
+    }
 
     const days: Day[] = [];
     for (let i = 0; i < dayTuples.length; i++) {
       const [startMin, endMin, originIdx, blockTuples, warnings, memberFixedTuples, lowWalking] = dayTuples[i];
-      if (!isNum(startMin) || !isNum(endMin) || !Array.isArray(blockTuples)) return null;
       const origin = DAY_ORIGINS[originIdx] ?? DAY_ORIGINS[0];
       const travelFn = lowWalking ? withWalkLimit(ctx.travel) : ctx.travel;
 
@@ -176,12 +279,12 @@ export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary 
       for (let j = 0; j < blockTuples.length; j++) {
         const [code, spotId, start, end, duration, planBId, planBDuration, flags, fixedTuple] = blockTuples[j];
         const label = CODE_LABEL[code];
-        if (!label || !isNum(start) || !isNum(end) || !isNum(duration) || !isNum(flags)) return null;
+        if (!label) return fail("invalid", `リンクの内容が正しくありません（ブロックの種類 ${code}）`);
         const id = `d${i + 1}b${j + 1}`;
 
         if (label === "fixed") {
-          const ev = fixedTuple ? tupleToFixed(fixedTuple) : null;
-          if (!ev) return null;
+          if (!fixedTuple) return fail("invalid", "リンクの内容が正しくありません（固定時刻の情報がありません）");
+          const ev = tupleToFixed(fixedTuple);
           const block = createFixedBlock({ ...ev, memberIds: null });
           const travel = travelFn(loc, ev.place);
           loc = ev.place;
@@ -191,8 +294,9 @@ export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary 
 
         const spot = spotId ? ctx.spotById.get(spotId) : undefined;
         if (!spot) {
+          if (spotId) return fail("unknown-spot", `存在しないスポットが含まれています（${spotId}）`);
           // 余白、または場所を決めない休憩
-          if (label !== "buffer" && label !== "rest") return null;
+          if (label !== "buffer" && label !== "rest") return fail("invalid", "リンクの内容が正しくありません（場所のない予定）");
           blocks.push({ id, label, durationMin: duration, startMin: start, endMin: end, plannedStartMin: start, plannedEndMin: end, travelMin: 0, travelMode: "none" });
           continue;
         }
@@ -202,7 +306,7 @@ export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary 
         let planB: Block["planB"] = undefined;
         if (planBId) {
           const alt = ctx.spotById.get(planBId);
-          if (!alt) return null;
+          if (!alt) return fail("unknown-spot", `存在しないスポットが含まれています（${planBId}）`);
           const switched = !!(flags & FLAG.switched);
           planB = {
             spotId: alt.id,
@@ -233,9 +337,7 @@ export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary 
         });
       }
 
-      const memberFixed = (Array.isArray(memberFixedTuples) ? memberFixedTuples : [])
-        .map(tupleToFixed)
-        .filter((f): f is FixedEvent => !!f);
+      const memberFixed = (memberFixedTuples ?? []).map(tupleToFixed);
       days.push({
         index: i,
         date: addDaysLocal(startDate, i),
@@ -243,31 +345,37 @@ export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary 
         endMin,
         origin,
         blocks,
-        warnings: Array.isArray(warnings) ? warnings.filter(isStr) : [],
+        warnings,
         memberFixed: memberFixed.length ? memberFixed : undefined,
         lowWalking: lowWalking ? true : undefined,
       });
     }
 
-    const members =
-      Array.isArray(memberTuples) && memberTuples.length
-        ? memberTuples.filter((m) => Array.isArray(m) && isStr(m[0]) && isStr(m[1])).map(([id, name]) => ({ id, name }))
-        : defaultMembers(prefs.companions);
-
-    return {
+    const members = memberTuples?.length ? memberTuples.map(([id, name]) => ({ id, name })) : defaultMembers(prefs.companions);
+    const itinerary: Itinerary = {
       version: 1,
       id: `shared-${token.slice(0, 8)}`,
       createdAt: new Date(0).toISOString(),
       startDate,
       prefs,
       days,
-      closedSpotIds: Array.isArray(closedSpotIds) ? closedSpotIds.filter(isStr) : [],
+      closedSpotIds,
       members,
-      settings: { marginMin: isNum(marginMin) ? marginMin : DEFAULT_MARGIN_MIN },
+      settings: { marginMin: marginMin ?? DEFAULT_MARGIN_MIN },
     };
+    // 組み立てた旅程が、アプリの保存形式として正しいことを最後に確かめる
+    const final = itinerarySchema.safeParse(itinerary);
+    if (!final.success) return fail("invalid", `リンクの内容が正しくありません（${final.error.issues[0].path.join(".")}: ${final.error.issues[0].message}）`);
+    return { ok: true, itinerary };
   } catch {
-    return null;
+    return fail("invalid", "リンクの内容を読み込めませんでした");
   }
+}
+
+/** 不正なトークン・存在しないスポットを含む場合は null（理由が要るときは decodeItineraryResult） */
+export function decodeItinerary(token: string, ctx: PlanningContext): Itinerary | null {
+  const r = decodeItineraryResult(token, ctx);
+  return r.ok ? r.itinerary : null;
 }
 
 function addDaysLocal(date: string, n: number): string {

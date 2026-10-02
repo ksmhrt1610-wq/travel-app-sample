@@ -38,7 +38,7 @@ describe("共有URL", () => {
 
   it("URLに載る文字だけでできている（base64url）", () => {
     const itin = generateItinerary({ prefs: { ...demoPrefs, duration: "overnight", pace: "packed" }, ctx, startDate: SATURDAY });
-    const url = buildShareUrl("https://example.test", itin);
+    const url = buildShareUrl("https://example.test", itin)!;
     expect(url).toMatch(/^https:\/\/example\.test\/share\?s=[A-Za-z0-9_-]+$/);
     expect(url.length).toBeLessThan(6000);
   });

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
+import { StorageGate } from "./StorageGate";
 import { cx } from "./ui";
 
 const NAV = [
@@ -28,6 +29,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </header>
 
+      <StorageGate />
       <main className="flex-1 pb-28">{children}</main>
 
       <nav

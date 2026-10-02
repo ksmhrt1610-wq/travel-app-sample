@@ -569,6 +569,136 @@ try {
     await page.waitForFunction((n) => document.querySelectorAll('[data-testid="block-buffer"]').length > n, buffersBefore);
     check("「余白を増やす」を選ぶと、余白が増える", (await page.locator(q("block-buffer")).count()) > buffersBefore);
   }
+
+  /* ====================================================================
+   * シナリオH: 堅牢性（壊れた共有リンク・保存データ・Error Boundary）
+   * ==================================================================== */
+
+  const b64url = (text) => Buffer.from(text, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const tokenOf = (payload) => b64url(JSON.stringify(payload));
+  const V3 = "replan-fukuoka:v3";
+  const V2 = "replan-fukuoka:v2";
+
+  step("H1. 壊れた共有リンクでも、画面が落ちず、理由が出る");
+  await page.evaluate(() => localStorage.clear());
+  await page.goto(BASE);
+  await page.waitForSelector(q("generate"));
+  await page.click(q("generate"));
+  await page.waitForURL("**/itinerary");
+  await page.waitForSelector(q("timeline"));
+  await page.click(q("share-button"));
+  await page.waitForSelector(q("share-url"));
+  const goodUrl = await page.inputValue(q("share-url"));
+  const goodPayload = JSON.parse(Buffer.from(new URL(goodUrl).searchParams.get("s").replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+  const mut = (fn) => {
+    const p = structuredClone(goodPayload);
+    fn(p);
+    return tokenOf(p);
+  };
+  const badLinks = [
+    ["時刻が文字列", mut((p) => (p[4][0][3][0][2] = "10:00")), /正しくありません/],
+    ["存在しないスポットID", mut((p) => (p[4][0][3][0][1] = "no-such-spot")), /存在しないスポット/],
+    ["巨大な配列（ブロックが多すぎる）", mut((p) => (p[4][0][3] = Array.from({ length: 90 }, () => structuredClone(goodPayload[4][0][3][0])))), /正しくありません/],
+    ["深いネスト", b64url("[".repeat(2800) + "]".repeat(2800)), /形式|対応していない|正しくありません/],
+    ["8KBを超えるリンク", "A".repeat(9000), /長すぎます/],
+    ["途中で切れたリンク", new URL(goodUrl).searchParams.get("s").slice(0, 60), /形式が壊れています|正しくありません/],
+  ];
+  for (const [label, token, re] of badLinks) {
+    await page.goto(`${BASE}/share?s=${token}`);
+    await page.waitForSelector(q("share-error"));
+    const reason = await text("share-error-reason");
+    check(`${label}: 落ちずに、理由が出る（${reason.slice(0, 40)}…）`, re.test(reason));
+  }
+  check("エラー画面からも、ナビゲーションが使える", (await page.locator('nav a[href="/"]').count()) === 1);
+
+  step("H2. 読めない保存データ（壊れている）は、確認してから削除・バックアップ");
+  await page.goto(`${BASE}/itinerary`);
+  await page.evaluate((k) => localStorage.setItem(k, "{壊れた保存データ"), V3);
+  await page.reload();
+  await page.waitForSelector(q("load-issue-dialog"));
+  check("確認ダイアログが出る（壊れている）", (await page.getAttribute(q("load-issue-dialog"), "data-kind")) === "corrupt");
+  check("確認が済むまでは、データは勝手に消えない", (await page.evaluate((k) => localStorage.getItem(k), V3)) === "{壊れた保存データ");
+  await page.click(q("load-issue-backup"));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="load-issue-dialog"]'));
+  check("「バックアップとして残す」を選ぶと、退避されて新しく始められる", (await page.evaluate(() => localStorage.getItem("replan-fukuoka:backup"))) === "{壊れた保存データ" && (await page.evaluate((k) => localStorage.getItem(k), V3)) === null);
+
+  step("H3. 旧版（v2）の保存データは v3 に変換され、食事の印も補われる");
+  await page.goto(BASE);
+  await page.waitForSelector(q("generate"));
+  await page.click(q("generate"));
+  await page.waitForURL("**/itinerary");
+  await page.waitForSelector(q("timeline"));
+  const stateText = await page.evaluate((k) => localStorage.getItem(k), V3);
+  const state = JSON.parse(stateText).state;
+  for (const d of state.itinerary.days) for (const b of d.blocks) delete b.meal;
+  delete state.today;
+  await page.evaluate(([k2, k3, v]) => {
+    localStorage.removeItem(k3);
+    localStorage.setItem(k2, v);
+  }, [V2, V3, JSON.stringify(state)]);
+  await page.goto(`${BASE}/itinerary`);
+  await page.waitForSelector(q("timeline"));
+  await page.waitForFunction(() => document.body.textContent?.includes("🍽"));
+  check("旧版のデータが読み込まれ、食事（ランチ・ディナー）の印が補われる", (await page.locator('[data-testid="block-spot"]', { hasText: "🍽" }).count()) >= 1);
+  await page.waitForFunction((k) => localStorage.getItem(k) !== null, V3);
+  check("v3 の形式で保存し直され、旧版のキーは消える", (await page.evaluate((k) => JSON.parse(localStorage.getItem(k)).version, V3)) === 3 && (await page.evaluate((k) => localStorage.getItem(k), V2)) === null);
+
+  step("H4. 読めない旧版・いまのデータにないスポットを含む保存データも、確認が出る");
+  await page.evaluate((k) => {
+    localStorage.removeItem("replan-fukuoka:v3");
+    localStorage.setItem(k, JSON.stringify({ itinerary: { version: 1, nonsense: true } }));
+  }, V2);
+  await page.reload();
+  await page.waitForSelector(q("load-issue-dialog"));
+  check("読めない旧版は「古い形式」として確認が出る", (await page.getAttribute(q("load-issue-dialog"), "data-kind")) === "legacy");
+  await page.click(q("load-issue-delete"));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="load-issue-dialog"]'));
+  check("「削除して始める」で、保存データが消える", (await page.evaluate((k) => localStorage.getItem(k), V2)) === null);
+  await page.goto(BASE);
+  await page.waitForSelector(q("generate"));
+  await page.click(q("generate"));
+  await page.waitForURL("**/itinerary");
+  await page.waitForSelector(q("timeline"));
+  const saved = JSON.parse(await page.evaluate((k) => localStorage.getItem(k), V3));
+  saved.state.itinerary.days[0].blocks[0].spotId = "gone-spot-id";
+  await page.evaluate(([k, v]) => localStorage.setItem(k, v), [V3, JSON.stringify(saved)]);
+  await page.reload();
+  await page.waitForSelector(q("load-issue-dialog"));
+  check("いまのデータにないスポットを含む保存データは、確認が出る", (await page.getAttribute(q("load-issue-dialog"), "data-kind")) === "unknown-spots");
+  await page.click(q("load-issue-delete"));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="load-issue-dialog"]'));
+
+  step("H5. 共有リンクから「自分の旅程として保存」できる（検証を通ったデータだけ）");
+  await page.goto(goodUrl);
+  await page.waitForSelector(q("share-banner"));
+  await page.click(q("save-shared"));
+  await page.waitForURL("**/itinerary");
+  await page.waitForSelector(q("timeline"));
+  check("保存されて、旅程画面で開く", (await page.locator(q("block-spot")).count()) >= 1 && (await page.locator(q("save-error-banner")).count()) === 0);
+
+  step("H6. 想定外の例外: Error Boundary の画面から、開き直し・初期化ができる");
+  await page.goto(`${BASE}/debug/crash`);
+  await page.waitForSelector(q("crash-now"));
+  await page.click(q("crash-now"));
+  await page.waitForSelector(q("error-screen"));
+  check("例外が起きても、エラー画面が出る（ヘッダー・ナビは残る）", (await text("error-screen")).includes("問題が起きました") && (await page.locator('nav a[href="/today"]').count()) === 1);
+  check("「データを初期化」「共有リンクを開き直す」「もう一度表示する」が選べる", (await page.locator(q("error-reset-data")).count()) === 1 && (await page.locator(q("error-open-share")).count()) === 1 && (await page.locator(q("error-retry")).count()) === 1);
+  await page.fill(q("error-share-input"), "これはリンクではありません！");
+  await page.click(q("error-open-share"));
+  check("共有リンクとして読み取れない入力は、案内が出る", (await text("error-screen")).includes("読み取れませんでした"));
+  await page.fill(q("error-share-input"), goodUrl);
+  await page.click(q("error-open-share"));
+  await page.waitForURL("**/share?s=*");
+  await page.waitForSelector(q("share-banner"));
+  check("貼り付けた共有リンクを開き直せる", true);
+  await page.goto(`${BASE}/debug/crash`);
+  await page.click(q("crash-now"));
+  await page.waitForSelector(q("error-screen"));
+  page.once("dialog", (d) => d.accept());
+  await page.click(q("error-reset-data"));
+  await page.waitForURL(`${BASE}/`);
+  check("「データを初期化」で、保存データがすべて消える", (await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("replan-fukuoka")).length)) === 0);
+  consoleErrors.length = 0; // この手順で起こした例外のログは、わざと起こしたもの
 } catch (e) {
   failures++;
   console.error("\n✗ シナリオ中にエラー:", e.message);

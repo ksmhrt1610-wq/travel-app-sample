@@ -8,7 +8,8 @@ import { Timeline } from "@/components/Timeline";
 import { Button, cx } from "@/components/ui";
 import { BUDGET_LABEL, COMPANIONS_LABEL, DURATION_LABEL, PACE_LABEL, RAIN_LABEL } from "@/core/labels";
 import { planBWarnings } from "@/core/planner";
-import { decodeItinerary } from "@/core/share";
+import { parseItinerary } from "@/core/schema";
+import { decodeItineraryResult } from "@/core/share";
 import { formatDateJa } from "@/core/time";
 import { saveTrip } from "@/store/tripStore";
 import { usePlanningContext } from "@/store/usePlanningContext";
@@ -21,16 +22,22 @@ function SharedView() {
   const [dayIdx, setDayIdx] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const itinerary = useMemo(() => (ctx && token ? decodeItinerary(token, ctx) : null), [ctx, token]);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const decoded = useMemo(() => (ctx ? decodeItineraryResult(token, ctx) : null), [ctx, token]);
+  const itinerary = decoded?.ok ? decoded.itinerary : null;
 
   if (!ctx) return <p className="py-16 text-center text-sm text-slate-500">読み込み中…</p>;
 
   if (!itinerary) {
     return (
-      <div className="px-4 py-16 text-center" data-testid="share-error">
+      <div className="px-4 py-16 text-center" data-testid="share-error" data-code={decoded && !decoded.ok ? decoded.code : undefined}>
         <p className="text-4xl">🔗</p>
         <p className="mt-3 text-base font-bold text-slate-800">共有リンクを読み込めませんでした</p>
-        <p className="mt-1 text-sm text-slate-500">リンクが途中で切れているか、古い形式の可能性があります。もう一度共有してもらってください。</p>
+        <p className="mt-1 text-sm text-slate-500" data-testid="share-error-reason">
+          {decoded && !decoded.ok ? decoded.reason : "リンクが途中で切れているか、古い形式の可能性があります。"}
+        </p>
+        <p className="mt-1 text-xs text-slate-400">もう一度共有してもらってください。</p>
         <Link href="/" className="mt-5 inline-flex min-h-12 items-center rounded-xl bg-brand-600 px-6 font-semibold text-white">
           自分の旅程をつくる
         </Link>
@@ -95,11 +102,26 @@ function SharedView() {
       </div>
 
       <div className="mt-4 grid gap-2">
+        {saveError && (
+          <p className="rounded-xl border border-rose-300 bg-rose-50 p-3 text-sm font-semibold text-rose-900" role="alert" data-testid="save-shared-error">
+            保存できませんでした（{saveError}）
+          </p>
+        )}
         <Button
           size="lg"
           data-testid="save-shared"
           onClick={() => {
-            saveTrip({ prefs: itinerary.prefs, itinerary });
+            // 検証を通ったデータだけ保存する
+            const checked = parseItinerary(itinerary);
+            if (!checked.ok) {
+              setSaveError(checked.reason);
+              return;
+            }
+            const r = saveTrip({ prefs: itinerary.prefs, itinerary: checked.value });
+            if (!r.ok) {
+              setSaveError(r.reason);
+              return;
+            }
             router.push("/itinerary");
           }}
         >
