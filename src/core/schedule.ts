@@ -168,6 +168,10 @@ export function recomputeDay(day: Day, ctx: PlanningContext, opts: RecomputeOpti
         // 着いた: 実績の時刻から、予定の滞在時間ぶん（まだ出発していなければ、いまの時刻まではここにいる）
         blk = { ...b, startMin: b.actualStartMin, endMin: Math.max(b.actualStartMin + b.durationMin, now ?? 0) };
       }
+      // いま余白の最中なら、その残りの時間が遅れを吸収する（余白は、遅れのための自由時間。吸収しきれない分だけが、次の予定にかかる）
+      if (pending > 0 && mode !== "compact" && b.label === "buffer" && b.actualStartMin === undefined && b.actualEndMin === undefined && now !== undefined) {
+        pending -= Math.min(pending, Math.max(0, blk.endMin - Math.max(now, blk.startMin)));
+      }
       out.push(blk);
       cursor = Math.max(cursor, blk.endMin);
       if (b.fixed?.endsDay) afterEnd = true;

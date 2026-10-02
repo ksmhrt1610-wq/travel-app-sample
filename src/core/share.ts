@@ -37,7 +37,8 @@ const VERSION = 2;
 const LABEL_CODE: Record<BlockLabel, string> = { fixed: "f", must: "m", normal: "n", optional: "o", buffer: "b", rest: "r" };
 const CODE_LABEL: Record<string, BlockLabel> = { f: "fixed", m: "must", n: "normal", o: "optional", b: "buffer", r: "rest" };
 
-const FLAG = { switched: 1, skipped: 2, closed: 8 } as const;
+// 4 は欠番。食事（ランチ・ディナー）は 16・32 で持つ（食事の保護が、共有リンクから保存した旅程でも効くように）
+const FLAG = { switched: 1, skipped: 2, closed: 8, lunch: 16, dinner: 32 } as const;
 
 type FixedTuple = [string, FixedKind, string, number, number, string, number, number, string, number, number, string[] | null];
 type BlockTuple = [string, string, number, number, number, string, number, number, FixedTuple?];
@@ -98,7 +99,8 @@ export function encodeItinerary(itin: Itinerary): string {
       d.endMin,
       Math.max(0, DAY_ORIGINS.findIndex((o) => o.name === d.origin.name)),
       d.blocks.map((b): BlockTuple => {
-        const flags = (b.switched ? FLAG.switched : 0) | (b.skip === "skipped" ? FLAG.skipped : 0) | (b.closed ? FLAG.closed : 0);
+        const flags =
+          (b.switched ? FLAG.switched : 0) | (b.skip === "skipped" ? FLAG.skipped : 0) | (b.closed ? FLAG.closed : 0) | (b.meal === "lunch" ? FLAG.lunch : b.meal === "dinner" ? FLAG.dinner : 0);
         const tuple: BlockTuple = [
           LABEL_CODE[b.label],
           b.spotId ?? "",
@@ -154,7 +156,7 @@ const idS = z.string().min(1).max(LIMITS.idLen);
 const idOrEmpty = z.string().max(LIMITS.idLen);
 const minuteS = z.number().finite().min(-LIMITS.maxMinute).max(LIMITS.maxMinute);
 const durationS = z.number().finite().min(0).max(24 * 60);
-const flagS = z.number().int().min(0).max(15);
+const flagS = z.number().int().min(0).max(63);
 const bitS = z.number().int().min(0).max(1);
 
 const fixedTupleS = z.tuple([
@@ -338,6 +340,7 @@ export function decodeItineraryResult(token: string, ctx: PlanningContext): Shar
           switched: !!(flags & FLAG.switched) || undefined,
           skip: flags & FLAG.skipped ? "skipped" : undefined,
           closed: !!(flags & FLAG.closed) || undefined,
+          meal: flags & FLAG.lunch ? "lunch" : flags & FLAG.dinner ? "dinner" : undefined,
         });
       }
 

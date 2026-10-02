@@ -783,6 +783,8 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
         ...day,
         blocks: day.blocks.map((b) => {
           if (!ids.has(b.id) || !b.planB) return b;
+          // もう終わった予定（実績で出発済み、または終了時刻が現在時刻以前）は、行った場所の記録なので書き換えない
+          if (b.actualEndMin !== undefined || (now !== undefined && b.endMin <= now)) return b;
           changed.push(b.id);
           return swapPlanB(b, ctx, now);
         }),
@@ -823,6 +825,12 @@ export function replan(itin: Itinerary, event: ReplanEvent, ctx: PlanningContext
     case "fixed-add": {
       const ev: FixedEvent = { ...event.fixed, id: event.fixed.id || nextId(allBlockIds(work), "fx") };
       const target = work.days[ev.dayIndex];
+      if (isGroupWide(ev, work.members) && now !== undefined && ev.timeMin <= now) {
+        // 現在時刻より前の固定時刻は、守りようがない（行った・過ぎた時刻を、予定に割り込ませない）
+        notes.push(`${hm(ev.timeMin)} は現在時刻（${hm(now)}）以前なので、固定時刻としては追加しません。`);
+        eventCause = { kind: "fixed", fixedId: ev.id };
+        break;
+      }
       if (isGroupWide(ev, work.members)) {
         const block = createFixedBlock({ ...ev, memberIds: null });
         const floor = target.blocks.findIndex((b) => movable(b, now));

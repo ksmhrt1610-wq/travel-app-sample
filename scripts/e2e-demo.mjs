@@ -397,6 +397,44 @@ try {
   check("やめると旅程は変わらない", (await page.locator(q("block-rest")).count()) === 0);
   await page.click(q("mode-suggest"));
 
+  step("B8. 最終便を 16:30 にして、14:30 に60分遅延 → 削られた予定の理由が「最終便」と出る");
+  await page.evaluate(() => localStorage.clear());
+  await page.goto(BASE);
+  await page.waitForSelector(q("generate"));
+  await page.click(q("pace-normal"));
+  await page.click(q("interest-history"));
+  await page.click(q("must-toggle"));
+  await page.click(q("must-dazaifu-shrine"));
+  await page.click(q("must-dazaifu-kyuhaku"));
+  await page.click(q("generate"));
+  await page.waitForURL("**/itinerary");
+  await page.waitForSelector(q("timeline"));
+  await page.click(q("fixed-add"));
+  await page.waitForSelector(q("fixed-dialog"));
+  await page.click(q("fixed-tab-custom"));
+  await page.selectOption(q("fixed-place"), { label: "太宰府駅" });
+  await page.fill(q("fixed-time"), "16:30");
+  await page.click(q("fixed-submit"));
+  await page.waitForSelector(q("proposal-sheet"));
+  await page.click(q("proposal-confirm"));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="proposal-sheet"]'));
+  check("最終便 16:30 の固定ブロックが入る", (await page.getAttribute(q("block-fixed"), "data-start")) === String(16 * 60 + 30));
+  await page.click(q("go-today"));
+  await page.waitForURL("**/today");
+  await page.waitForSelector(q("next-card"));
+  await setNowSlider(14 * 60 + 30);
+  await page.selectOption(q("sim-delay-select"), "60");
+  await page.click(q("sim-delay-button"));
+  await waitProposal();
+  check("標準の予定を外す案なので、軽い変更ではなく、確認が出る", (await page.locator(q("proposal-heavy")).count()) === 1);
+  const b8reasons = await page.locator(`${q("proposal-diff")} ${q("diff-reason")}`).allTextContents();
+  check(`削られた・短くなった予定の理由に「最終便」が出る（${b8reasons[0] ?? ""}）`, b8reasons.length >= 1 && b8reasons.some((t) => t.includes("最終便")));
+  check("案の差分のすべてに理由が出る", b8reasons.length === (await page.locator(`${q("proposal-diff")} li`).count()));
+  await shot("B8-last-train-removal");
+  await confirmProposal();
+  check("確定後も、最終便は 16:30 のまま・間に合わない警告もない", (await page.getAttribute(q("block-fixed"), "data-start")) === String(16 * 60 + 30) && (await page.locator(q("fixed-missed")).count()) === 0);
+  check("履歴の差分に「最終便」の理由が残る", (await text("diff-panel")).includes("最終便"));
+
   /* ====================================================================
    * シナリオM: 3つのモード（手動／提案／おまかせ）
    * ==================================================================== */
@@ -827,6 +865,41 @@ try {
   await page.goto(`${BASE}/today`);
   await page.waitForSelector(q("timeline"));
   check("当日モードで、確定した旅程を開ける", (await page.locator(q("block-spot")).count()) >= 2);
+
+  step("C1. グループの旅程: 当日の遅延（おまかせ: 自動反映 → 元に戻す）と、雨（Must の屋外は確認 → 元に戻す）");
+  await page.waitForSelector(q("next-card"));
+  await page.click(q("mode-auto"));
+  check("おまかせモードに切り替わる", (await page.getAttribute(q("mode-switch"), "data-mode")) === "auto");
+  await setNowSlider(9 * 60 + 30);
+  await closeSim();
+  const sigOf = (list) => JSON.stringify(list.map((b) => [b.id, b.spotId, b.start, b.end, b.switched]));
+  const c0 = await readBlocks();
+  await openSim();
+  await page.selectOption(q("sim-delay-select"), "30");
+  await page.click(q("sim-delay-button"));
+  await page.waitForSelector(q("diff-panel"));
+  check("遅延（軽い変更）は、確認なしでそのまま反映される（組み直し案は出ない）", (await text("diff-title")).includes("遅延") && (await page.locator(q("proposal-card")).count()) === 0);
+  await page.click(q("undo-latest"));
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="diff-panel"]').length === 0);
+  check("「元に戻す」で、遅延の前の旅程にぴったり戻る", sigOf(await readBlocks()) === sigOf(c0));
+  await openSim();
+  await page.click(q("sim-rain-button"));
+  await page.waitForSelector(`${q("rain-banner")}, ${q("proposal-card")}, ${q("diff-panel")}`);
+  if (await page.locator(q("rain-banner")).count()) {
+    check("Must の屋外は、おまかせモードでも自動では替えず、通知で聞く", true);
+    await page.click(q("rain-switch-all"));
+  }
+  await page.waitForSelector(`${q("proposal-card")}, ${q("diff-panel")}`);
+  if (await page.locator(q("proposal-card")).count()) {
+    check("雨で Must の屋外を Plan B に替える案は、重い変更なので確認が出る（おまかせでも自動では反映しない）", (await page.locator(q("proposal-heavy")).count()) === 1);
+    await confirmProposal();
+  }
+  const c1 = await readBlocks();
+  check("確定すると、屋外の予定が Plan B に切り替わる", c1.some((b) => b.switched));
+  check("差分のすべてに、理由（雨のため）が出る", (await page.locator(`${q("diff-panel")} ${q("diff-reason")}`).count()) >= 1 && (await text("diff-panel")).includes("雨のため"));
+  await page.click(q("undo-latest"));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="diff-panel"]') || !document.querySelector('[data-testid="undo-latest"]'));
+  check("「元に戻す」で、雨の前の旅程にぴったり戻る", sigOf(await readBlocks()) === sigOf(c0));
 
   step("G6. グループの保存データが壊れていても、確認が出る（勝手に消さない）");
   await page.evaluate(() => localStorage.setItem("replan-fukuoka:group:v1", "{壊れたグループ"));
