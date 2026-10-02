@@ -258,6 +258,12 @@ export default function ItineraryPage() {
             }}
             onCancel={() => setProposal(null)}
             onRemoveMust={(blockId) => propose(proposal.event, [...proposal.removeMustIds, blockId])}
+            onApplySuggestion={(s) => {
+              const base = proposal.result.after;
+              commit(base, "確定して、旅程に反映しました");
+              const result = replan(base, s.event, ctx, { dayIndex: day.index });
+              setProposal({ event: s.event, title: describeEvent(s.event, ctx, base), result, removeMustIds: [] });
+            }}
           />
         )}
       </Sheet>

@@ -5,6 +5,8 @@ import type { DiffItem } from "@/core/diff";
 import type { FixedDeparture } from "@/core/fixed";
 import { BLOCK_LABEL, CATEGORY_ICON, CATEGORY_LABEL, FIXED_KIND_ICON, FIXED_KIND_LABEL, SETTING_ICON, SETTING_LABEL } from "@/core/labels";
 import { formatDuration, formatHHMM } from "@/core/time";
+import { MEAL_LABEL } from "@/core/meals";
+import type { RestMode } from "@/core/replan";
 import type { Block, PlanningContext } from "@/core/types";
 import { Chip, cx, LABEL_STYLE } from "./ui";
 
@@ -20,6 +22,8 @@ interface Props {
   departure?: FixedDeparture;
   /** この予定にいないメンバー（特定メンバーだけの固定時刻で抜けたあと） */
   absent?: string[];
+  /** 休憩ブロックの種類（ここで延長／近くで休む／場所は決めない） */
+  restMode?: RestMode | null;
   onOpen: () => void;
 }
 
@@ -44,7 +48,7 @@ export function AbsentChips({ names }: { names?: string[] }) {
   );
 }
 
-export function BlockCard({ block, ctx, inProgress, change, handle, departure, absent, onOpen }: Props) {
+export function BlockCard({ block, ctx, inProgress, change, handle, departure, absent, restMode, onOpen }: Props) {
   const spot = block.spotId ? ctx.spotById.get(block.spotId) : undefined;
   const planBSpot = block.planB ? ctx.spotById.get(block.planB.spotId) : undefined;
   const style = LABEL_STYLE[block.label];
@@ -107,7 +111,9 @@ export function BlockCard({ block, ctx, inProgress, change, handle, departure, a
         <button type="button" onClick={onOpen} className="flex w-full items-center gap-2 px-3 py-2.5 text-left">
           <span className="text-xl">☕</span>
           <span className="flex-1">
-            <span className="block text-sm font-bold text-amber-900">休憩{spot ? `：${spot.name}` : "（近くで）"}</span>
+            <span className="block text-sm font-bold text-amber-900" data-rest-mode={restMode ?? undefined}>
+              {restMode === "extend" && spot ? `ここで休憩を延長：${spot.name}` : spot ? `休憩：${spot.name}` : "休憩（近くで）"}
+            </span>
             <span className="block text-xs text-amber-800">
               {formatDuration(block.endMin - block.startMin)}
               {spot ? `・${SETTING_ICON[spot.setting]} ${SETTING_LABEL[spot.setting]}` : "・場所は決めていません"}
@@ -181,12 +187,14 @@ export function BlockCard({ block, ctx, inProgress, change, handle, departure, a
 
           <div className="mt-1.5 flex flex-wrap gap-1">
             {inProgress && <Chip className="bg-brand-600 text-white">いま</Chip>}
+            {block.meal && <Chip className="bg-orange-100 text-orange-800">🍽 {MEAL_LABEL[block.meal]}</Chip>}
             {block.switched && <Chip className="bg-emerald-100 text-emerald-800">🔁 Plan B に切替済み</Chip>}
             {closed && <Chip className="bg-rose-100 text-rose-700">⛔ 臨時休業</Chip>}
             {skipped && !closed && <Chip className="bg-slate-200 text-slate-600">スキップ</Chip>}
             {!inert && shortFrom && <Chip className="bg-sky-100 text-sky-800">✂ 滞在 {shortFrom}分 → {block.durationMin}分</Chip>}
             {!inert && delay > 0 && <Chip className="bg-amber-100 text-amber-800">⏱ +{delay}分 遅れ</Chip>}
             {!inert && block.issues?.includes("outside-hours") && <Chip className="bg-rose-100 text-rose-700">営業時間外の見込み</Chip>}
+            {!inert && block.issues?.includes("outside-meal-window") && <Chip className="bg-rose-100 text-rose-700">食事の時間帯に収まらない見込み</Chip>}
             {!inert && block.issues?.includes("after-last-transport") && <Chip className="bg-rose-100 text-rose-700">最終便のあと</Chip>}
             {!inert && block.issues?.includes("over-day-end") && !block.issues.includes("outside-hours") && (
               <Chip className="bg-amber-100 text-amber-800">終了予定時刻を超過</Chip>

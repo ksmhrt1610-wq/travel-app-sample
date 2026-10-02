@@ -16,6 +16,7 @@ import type { DiffItem } from "@/core/diff";
 import { absenceByBlock, allFixedDepartures, memberFixedStatuses, type MemberFixedStatus } from "@/core/fixed";
 import { travelLabel } from "@/core/labels";
 import { mapsDirectionsUrl } from "@/core/maps";
+import { restKind } from "@/core/replan";
 import { isInert } from "@/core/schedule";
 import { formatDuration, formatHHMM } from "@/core/time";
 import type { Block, Day, Member, PlanningContext } from "@/core/types";
@@ -124,6 +125,7 @@ function Row({
           change={changes?.get(block.id)}
           departure={departure}
           absent={absent}
+          restMode={restKind(day, index, ctx)}
           onOpen={() => onOpen(block.id)}
           handle={sortable && !locked && block.label !== "rest" ? <DragHandle attributes={attributes} listeners={listeners} /> : undefined}
         />

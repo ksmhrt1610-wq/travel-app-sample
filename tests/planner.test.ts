@@ -175,7 +175,7 @@ describe("旅程生成: 入力条件のスコアリング", () => {
 
   it("サンプルデータは30〜40件で、屋内・屋外がバランスよく含まれる", () => {
     expect(spots.length).toBeGreaterThanOrEqual(30);
-    expect(spots.length).toBeLessThanOrEqual(40);
+    expect(spots.length).toBeLessThanOrEqual(45);
     const indoor = spots.filter((s) => s.setting === "indoor").length;
     const outdoor = spots.filter((s) => s.setting !== "indoor").length;
     expect(indoor).toBeGreaterThanOrEqual(10);

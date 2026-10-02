@@ -1,7 +1,8 @@
 "use client";
 
 import { mapsDirectionsUrl } from "@/core/maps";
-import type { ReplanResult, ReplanStep } from "@/core/replan";
+import { restKind, type ReplanResult, type ReplanStep } from "@/core/replan";
+import type { Suggestion } from "@/core/suggest";
 import { formatDuration } from "@/core/time";
 import type { Block, Itinerary, PlanningContext } from "@/core/types";
 import { DiffList, DiffSummary } from "./DiffPanel";
@@ -24,6 +25,8 @@ const REDUCE_ORDER: { kind: ReplanStep["kind"]; no: string; label: string }[] = 
   { kind: "drop-optional", no: "①", label: "Optional を後ろから削除" },
   { kind: "shorten", no: "②", label: "滞在時間を短縮（最低滞在時間まで）" },
   { kind: "drop-standard", no: "③", label: "標準の予定を後ろから削除" },
+  { kind: "meal-shorten", no: "④", label: "食事の滞在時間を短縮（食事は削りません）" },
+  { kind: "meal-replace", no: "⑤", label: "食事の店を、近くの別の店に差し替え" },
 ];
 
 function stepText(step: ReplanStep, r: ReplanResult, ctx: PlanningContext): string {
@@ -39,12 +42,23 @@ function stepText(step: ReplanStep, r: ReplanResult, ctx: PlanningContext): stri
       return `代わりのスポットに切り替え：${names(step.blockIds)}`;
     case "insert-rest": {
       const b = blockOf(r.after, step.blockIds[0]);
-      return `休憩を追加：${step.detail ? `「${step.detail}」` : "近くで"}（${formatDuration(b?.durationMin ?? 0)}）`;
+      const day = r.after.days[r.dayIndex];
+      const mode = day ? restKind(day, day.blocks.findIndex((x) => x.id === step.blockIds[0]), ctx) : null;
+      const how = mode === "extend" ? "ここで延長" : step.detail ? `「${step.detail}」` : "場所は決めない";
+      return `休憩を追加：${how}（${formatDuration(b?.durationMin ?? 0)}）`;
     }
     case "fixed-add":
       return `固定時刻を追加：${step.detail}`;
     case "fixed-remove":
       return "固定時刻を外す";
+    case "fixed-move":
+      return `固定時刻を変更：${step.detail}`;
+    case "add-spot":
+      return `予定に追加：${step.detail}`;
+    case "meal-shorten":
+      return `食事の滞在を短縮：${names(step.blockIds)} ${step.detail}`;
+    case "meal-replace":
+      return `食事の店を差し替え：${step.detail}`;
     case "margin":
       return `余裕時間を ${step.detail} に変更`;
     case "skip":
@@ -74,12 +88,14 @@ interface Props {
   onCancel: () => void;
   /** 確認したうえで、この Must を外した案にする */
   onRemoveMust: (blockId: string) => void;
+  /** 空きができたときの提案を選んだ（提案として組み直す） */
+  onApplySuggestion?: (s: Suggestion) => void;
 }
 
 /**
  * 再計画エンジンの提案を見せるカード。差分を確認し、確定ボタンで初めて旅程に反映する。
  */
-export function ProposalCard({ result, ctx, title, onConfirm, onCancel, onRemoveMust }: Props) {
+export function ProposalCard({ result, ctx, title, onConfirm, onCancel, onRemoveMust, onApplySuggestion }: Props) {
   const events = result.steps.filter((s) => s.phase === "event" || s.phase === "tidy");
   const reduce = result.steps.filter((s) => s.phase === "reduce");
   const walkDiff = result.walkingBeforeM - result.walkingAfterM;
@@ -125,7 +141,7 @@ export function ProposalCard({ result, ctx, title, onConfirm, onCancel, onRemove
           </ul>
           {reduce.length > 0 && (
             <>
-              <p className="mb-1 mt-2 text-[11px] font-bold text-slate-500">時間が足りないため、優先度の低い順に削減（固定時刻 → Must → 休憩・余白 → Optional）</p>
+              <p className="mb-1 mt-2 text-[11px] font-bold text-slate-500">時間が足りないため、優先度の低い順に削減（守る順: 固定時刻 → Must → 食事 → 休憩 → 標準 → Optional）</p>
               <ul className="space-y-0.5">
                 {REDUCE_ORDER.map((o) => {
                   const hits = reduce.filter((s) => s.kind === o.kind);
@@ -191,13 +207,13 @@ export function ProposalCard({ result, ctx, title, onConfirm, onCancel, onRemove
 
       {result.mustCandidates.length > 0 && (
         <div className="mt-3 rounded-xl border-2 border-rose-300 bg-rose-50 p-3" data-testid="must-candidates">
-          <p className="text-[13px] font-extrabold text-rose-950">Must を削る候補があります（確認が必要です）</p>
-          <p className="mt-0.5 text-xs text-rose-900">Must は自動では削りません。外してよい予定があれば選んでください。固定時刻は守ります。</p>
+          <p className="text-[13px] font-extrabold text-rose-950">Must・食事を削る候補があります（確認が必要です）</p>
+          <p className="mt-0.5 text-xs text-rose-900">Must と食事は自動では削りません。外してよい予定があれば選んでください。固定時刻は守ります。</p>
           <ul className="mt-2 space-y-1.5">
             {result.mustCandidates.map((c) => (
               <li key={c.blockId} className="flex items-center gap-2 rounded-lg bg-white p-2 text-[13px]">
                 <span className="flex-1">
-                  <strong>{c.name}</strong>
+                  <strong>{c.kind === "meal" ? "🍽 " : ""}{c.name}</strong>
                   <span className={cx("block text-[11px] font-semibold", c.fixesAll ? "text-emerald-700" : "text-amber-700")}>
                     {c.fixesAll ? "外すと間に合います" : "外しても、まだ足りない予定が残ります"}
                   </span>
@@ -205,6 +221,26 @@ export function ProposalCard({ result, ctx, title, onConfirm, onCancel, onRemove
                 <Button variant="danger" size="sm" onClick={() => onRemoveMust(c.blockId)} data-testid={`remove-must-${c.blockId}`}>
                   これを外した案にする
                 </Button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {result.suggestions.length > 0 && (
+        <div className="mt-3 rounded-xl border border-teal-300 bg-teal-50 p-3" data-testid="gap-suggestions">
+          <p className="text-[13px] font-extrabold text-teal-950">最終便まで時間が空きます</p>
+          <p className="mt-0.5 text-xs text-teal-900">選ぶと、いまの案を確定したうえで、新しい組み直し案を作ります（それも確認してから反映されます）。</p>
+          <ul className="mt-2 space-y-1.5">
+            {result.suggestions.map((s) => (
+              <li key={s.id} className="rounded-lg bg-white p-2 text-[13px]" data-suggestion-kind={s.kind}>
+                <strong>{s.title}</strong>
+                <span className="block text-[11px] text-slate-600">{s.detail}</span>
+                {onApplySuggestion && (
+                  <Button variant="secondary" size="sm" className="mt-1.5" onClick={() => onApplySuggestion(s)} data-testid={`suggestion-${s.kind}`}>
+                    この案で組み直す
+                  </Button>
+                )}
               </li>
             ))}
           </ul>

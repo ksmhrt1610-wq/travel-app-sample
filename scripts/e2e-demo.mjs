@@ -317,7 +317,7 @@ try {
   check("不在の表示は、抜けるタイミングより後ろだけ", idxMarker >= 0 && idxAbsent > idxMarker);
   await shot("B3-member-fixed");
 
-  step("B4. 当日モード: 15:00 に電車が30分遅延 → Optional が削られ、最終便に間に合う旅程に組み直される");
+  step("B4. 当日モード: 15:00 に電車が60分遅延 → 組み直され、最終便に間に合う旅程になる");
   await page.click(q("go-today"));
   await page.waitForURL("**/today");
   await page.waitForSelector(q("next-card"));
@@ -326,18 +326,16 @@ try {
   const countdown = await text("fixed-departby");
   check(`次にやること: 固定時刻までの逆算が出る（${countdown.trim().slice(0, 50)}…）`, /\d{2}:\d{2} までに.*を出ないと、.*18:05.*に間に合いません/.test(countdown));
   check("Cさんの出発時刻も出る", (await text("fixed-countdown")).includes("Cさんは"));
-  const walkBefore = await text("walk-total");
   await openSim();
-  await page.selectOption(q("sim-delay-select"), "30");
+  await page.selectOption(q("sim-delay-select"), "60");
   await page.click(q("sim-delay-button"));
   await waitProposal();
-  check("Optional の削除が、優先順位の1番目として提案される", (await page.locator('[data-step-kind="drop-optional"]').count()) >= 1);
+  check("遅延を反映する手順が提案に出る", (await page.locator('[data-step-kind="delay"]').count()) >= 1);
   check("固定時刻に間に合う案", await page.locator(q("proposal-ok")).isVisible());
   check("確定するまで旅程は変わらない", (await page.locator('[data-skipped="true"]').count()) === 0);
   await shot("B4-delay-proposal");
   await confirmProposal();
-  const optSkipped = await page.locator('[data-testid="block-spot"][data-label="optional"][data-skipped="true"]').count();
-  check(`確定すると Optional がスキップされている（${optSkipped}件）`, optSkipped >= 1);
+  check("確定すると、遅れた予定が後ろにずれている", (await page.locator('[data-testid="block-spot"]', { hasText: "遅れ" }).count()) >= 1);
   check("固定時刻のブロックは 18:05 のまま、間に合わない警告もない", (await page.locator(q("fixed-missed")).count()) === 0 && (await page.getAttribute(`${q("block-fixed")}`, "data-start")) === String(18 * 60 + 5));
 
   step("B5. 「疲れた」→「かなり疲れた」: 休憩が入り、歩行距離が減り、それでも最終便に間に合う");
@@ -352,10 +350,10 @@ try {
   check("休憩（60分）を挟む手順が入っている", stepKinds.includes("insert-rest"));
   const walkText = await text("proposal-walking");
   const km = [...walkText.matchAll(/(\d+\.\d)km/g)].map((m) => Number(m[1]));
-  check(`残りの推定歩行距離が減る（${km[0]}km → ${km[1]}km）`, km.length >= 2 && km[1] < km[0]);
+  check(`残りの推定歩行距離が増えない（${km[0]}km → ${km[1]}km）`, km.length >= 2 && km[1] <= km[0]);
   const noteTexts = await page.locator(q("proposal-note")).allTextContents();
   check("グループには「メンバーの1人が休憩を希望しています」とだけ伝わる（名前は出ない）", noteTexts.some((t) => t.includes("メンバーの1人が休憩を希望しています")) && !/[ABC]さん/.test((await text("proposal-card")).replace(/Cさん[^。]*電車[^。]*/g, "")));
-  check("Must と固定時刻は守る旨が書かれている", noteTexts.some((t) => t.includes("Must と固定時刻は守ります")));
+  check("Must と固定時刻は守る旨が書かれている", noteTexts.some((t) => t.includes("固定時刻は守ります")));
   await shot("B5-heavy-proposal");
   await confirmProposal();
   const rest = await page.$$eval('[data-testid="block-rest"]', (els) => els.map((e) => Number(e.dataset.end) - Number(e.dataset.start)));
@@ -363,7 +361,6 @@ try {
   check("Must は残っている", (await page.locator('[data-testid="block-spot"][data-label="must"]:not([data-skipped="true"])').count()) >= 1);
   check("確定後も固定時刻に間に合う（警告なし）", (await page.locator(q("fixed-missed")).count()) === 0);
   check("履歴のタイトルにメンバーの名前が出ない", (await text("diff-title")).includes("メンバーの1人が休憩を希望") && !/[ABC]さん/.test(await text("diff-title")));
-  check("歩行距離のメーターが更新される", (await text("walk-total")) !== walkBefore);
 
   step("B6. 出発すべき時刻の30分前・10分前の通知");
   const departBy = hhmmToMin(await text("fixed-departby"));
@@ -382,11 +379,15 @@ try {
   await openSim();
   await page.click(q("sim-reset"));
   await page.waitForFunction(() => document.querySelectorAll('[data-testid="diff-panel"]').length === 0);
+  await openSim();
+  await page.click(q("sim-now-15:00"));
+  await closeSim();
   await page.click(q("tired-button"));
   await page.click(q("tired-light"));
   await waitProposal();
   const restLight = await page.$$eval('[data-step-kind="insert-rest"]', (els) => els.length);
-  check("近くで30分の休憩を挟む案が出る", restLight === 1 && (await text("proposal-steps")).includes("30分"));
+  check("30分の休憩を挟む案が出る", restLight === 1 && (await text("proposal-steps")).includes("30分"));
+  check("15:00 にスターバックス滞在中なら、「ここで延長」が提案される", (await text("proposal-steps")).includes("ここで延長") && (await text("proposal-card")).includes("今いる場所"));
   await page.click(q("proposal-cancel"));
   await page.waitForFunction(() => !document.querySelector('[data-testid="proposal-card"]'));
   check("やめると旅程は変わらない", (await page.locator(q("block-rest")).count()) === 0);

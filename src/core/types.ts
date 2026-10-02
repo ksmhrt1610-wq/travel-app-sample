@@ -48,6 +48,12 @@ export interface Spot extends LatLng {
   popularity: 1 | 2 | 3;
   /** 食事として扱えるスポット（ランチ／ディナー）。未指定は食事枠に使わない */
   mealSlots?: MealSlot[];
+  /** 軽食（梅ヶ枝餅など）。食事枠には使わない。通常のスポットとして立ち寄る */
+  snack?: boolean;
+  /** 屋内で座って休める場所（カフェ・商業施設・博物館など）。「疲れた」の休憩場所の候補になる */
+  restable: boolean;
+  /** データについての補足（店名・営業時間・位置が概算など）。画面にも出す */
+  dataNote?: string;
   description: string;
 }
 
@@ -73,10 +79,11 @@ export interface Preferences {
 /* ---------- 旅程 ---------- */
 
 /**
- * 再計画のときの優先順位: fixed（固定時刻）> must > rest / buffer（休憩・余白）> optional。
- * normal（標準）は Optional と Must の中間として扱う。
+ * 再計画のときの保護の優先順位（高い順）: 固定時刻 > Must > 食事 > 休憩 > 標準 > Optional。
+ * 余白（buffer）は遅れの吸収材として最初に縮む（ペース別の下限まで）。
  *   fixed: 固定時刻（終電・予約など。動かせない）/ must: 絶対に行きたい / normal: 標準
  *   optional: 余力があれば / buffer: 余白（遅れを吸収する自由時間）/ rest: 「疲れた」で入れた休憩（保護される）
+ * 食事はラベルとは別に `meal` 属性で表す（食事の店が Must のこともあるため）。
  */
 export type BlockLabel = "fixed" | "must" | "normal" | "optional" | "buffer" | "rest";
 export type TravelMode = "walk" | "transit" | "none";
@@ -92,8 +99,16 @@ export interface PlanB {
 /**
  * outside-hours: 営業時間に収まらない / over-day-end: 1日の終了予定時刻を超える / closed: 臨時休業
  * fixed-missed: 固定時刻に間に合わない / after-last-transport: 最終便のあとに予定が残っている
+ * outside-meal-window: 食事が食事の時間帯に収まらない
  */
-export type BlockIssue = "outside-hours" | "over-day-end" | "closed" | "fixed-missed" | "after-last-transport";
+export type BlockIssue =
+  | "outside-hours"
+  | "over-day-end"
+  | "closed"
+  | "fixed-missed"
+  | "after-last-transport"
+  /** 食事が、食事の時間帯（ランチ 11:00〜14:30／ディナー 17:00〜21:00）に収まらない */
+  | "outside-meal-window";
 
 /* ---------- 固定時刻・メンバー ---------- */
 
@@ -149,6 +164,8 @@ export interface Block {
   planB?: PlanB | null;
   switched?: boolean;
   skip?: "skipped";
+  /** 食事ブロック（ランチ／ディナー）。削除せず、時刻・滞在・店の差し替えで調整する */
+  meal?: MealSlot;
   /** 臨時休業 */
   closed?: boolean;
   /** 進行中ブロックを切り替えたとき、これより前には始められない */
@@ -225,6 +242,13 @@ export interface GenerateInput {
   /** テスト・再現用に旅程IDを固定したいとき */
   id?: string;
   createdAt?: string;
+  /** 生成の調整（テストで効果を比べるために切り替えられる。省略時はどちらも有効） */
+  options?: {
+    /** 動線の改善（2-opt）をする */
+    optimizeRoute?: boolean;
+    /** 1日の歩行距離をペース別の目安の85%以内に収める */
+    limitWalking?: boolean;
+  };
 }
 
 /** 旅程生成を差し替え可能にするための関数型（ルールベース → LLM など） */

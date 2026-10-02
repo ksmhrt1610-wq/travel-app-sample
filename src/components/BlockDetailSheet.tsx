@@ -63,6 +63,11 @@ function SpotFacts({ spot }: { spot: Spot }) {
       <Row label="平均滞在時間">{formatDuration(spot.stayMin)}</Row>
       <Row label="価格帯">{PRICE_LABEL[spot.priceLevel]}</Row>
       <Row label="混雑しやすい時間">{spot.crowded?.length ? spot.crowded.map((c) => `${c.open}〜${c.close}`).join(" / ") : "特になし"}</Row>
+      {spot.dataNote && (
+        <div className="py-2 text-xs font-semibold text-amber-800" data-testid="spot-data-note">
+          ※ {spot.dataNote}
+        </div>
+      )}
     </dl>
   );
 }
@@ -140,7 +145,7 @@ export function BlockDetailSheet({ open, onClose, block, day, ctx, mode, nowMin,
             <span className="ml-2 text-sm font-semibold text-slate-500">（{formatDuration(block.endMin - block.startMin)}）</span>
           </p>
           <p className="rounded-xl bg-amber-50 p-3 text-sm leading-relaxed text-amber-900">
-            「疲れた」で入れた休憩です。休憩は保護されるので、時間が足りなくなっても Optional が先に削られます。
+            「疲れた」などで入れた休憩です。休憩は保護されるので、時間が足りなくなっても、標準・Optional の予定が先に削られます。
           </p>
           {spot && (
             <>

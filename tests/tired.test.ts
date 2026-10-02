@@ -65,13 +65,30 @@ describe("疲れた: 少し休みたい", () => {
     expect(blocks[restIdx + 1].id).toBe("c");
   });
 
-  it("近くに休憩できる屋内カフェがなければ、場所を決めない休憩を入れ、その旨を伝える", () => {
-    // 博多駅周辺には、800m以内の屋内カフェがない
-    const r = replan(zigzag(), { type: "tired", level: "light" }, ctx, { dayIndex: 0, nowMin: hm(10, 15) });
+  it("近くに休憩できる屋内の場所がなければ、場所を決めない休憩を入れ、その旨を伝える", () => {
+    // 観世音寺の周辺（800m以内）には、屋内の休める場所がない
+    const day = makeDay(
+      [
+        { id: "a", spotId: "dazaifu-kanzeonji", start: hm(10), end: hm(10, 30) },
+        { id: "b", spotId: "dazaifu-komyozen", start: hm(11), end: hm(11, 30) },
+      ],
+      ctx,
+    );
+    const r = replan(wrapItinerary(day), { type: "tired", level: "light" }, ctx, { dayIndex: 0, nowMin: hm(10, 15) });
     const rest = r.after.days[0].blocks.find((b) => b.label === "rest")!;
     expect(rest.spotId).toBeUndefined();
     expect(rest.endMin - rest.startMin).toBe(30);
-    expect(r.notes.join("")).toContain("休憩できる屋内カフェが見つからなかった");
+    expect(r.notes.join("")).toContain("休憩できる屋内の場所が見つからなかった");
+  });
+
+  it("カフェに限らず、博物館・商業施設などの屋内の休める場所も休憩場所になる", () => {
+    // 博多の櫛田神社（屋外）の近くには、休める博物館・商業施設があり、カフェでなくても選ばれる
+    const r = replan(zigzag(), { type: "tired", level: "light" }, ctx, { dayIndex: 0, nowMin: hm(10, 15) });
+    const rest = r.after.days[0].blocks.find((b) => b.label === "rest")!;
+    const spot = spotOf(rest.spotId)!;
+    expect(spot).toBeTruthy();
+    expect(spot.restable).toBe(true);
+    expect(spot.setting).toBe("indoor");
   });
 
   it("Must と固定時刻は守る。休憩を入れても固定時刻に間に合う", () => {
@@ -119,7 +136,7 @@ describe("疲れた: かなり疲れた", () => {
     expect(rest.endMin - rest.startMin).toBe(60);
     expect(locateBlock(r.after, "e")!.block.skip).toBe("skipped"); // Optional
     expect(locateBlock(r.after, "b")!.block.skip).toBeUndefined(); // Must
-    expect(r.notes.join("")).toContain("Must と固定時刻は守ります");
+    expect(r.notes.join("")).toContain("Must・食事と固定時刻は守ります");
   });
 
   it("残りの総歩行距離が減る", () => {

@@ -81,6 +81,21 @@ export const FIXED_PRESETS: FixedPreset[] = [
   },
 ];
 
+/**
+ * 最終便より前の便（サンプル）。最終便の前に長い空きができたとき、「早い便で帰る」の候補に使う。
+ * 場所の名前ごとの時刻（0:00 からの分）。実在の時刻表ではありません。
+ */
+export const FIXED_EARLIER_SERVICES: Record<string, number[]> = {
+  太宰府駅: [15 * 60 + 35, 16 * 60 + 35, 17 * 60 + 5, 17 * 60 + 35],
+  太宰府天満宮前バス停: [17 * 60 + 20, 18 * 60, 18 * 60 + 40, 19 * 60],
+  筑前前原駅: [18 * 60 + 10, 18 * 60 + 40, 19 * 60 + 10, 19 * 60 + 40],
+};
+
+/** beforeMin より前の、同じ場所の便（時刻の昇順） */
+export function earlierServices(placeName: string, beforeMin: number): number[] {
+  return (FIXED_EARLIER_SERVICES[placeName] ?? []).filter((t) => t < beforeMin).sort((a, b) => a - b);
+}
+
 /** 固定時刻の場所に選べる駅・施設（スポット以外） */
 export const FIXED_PLACES: Origin[] = [
   { name: "博多駅", lat: 33.5898, lng: 130.4207 },

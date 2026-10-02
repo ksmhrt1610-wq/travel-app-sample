@@ -1,9 +1,10 @@
 import { findOpenSlot, isOpenOnDate, overlapsCrowded } from "./availability";
 import { withWalkLimit } from "./geo";
+import { MEAL_ADJUST_WINDOW } from "./meals";
 import { parseHHMM } from "./time";
 import type { Block, BlockIssue, Day, LatLng, PlanningContext, Spot, TravelEstimate, TravelEstimator } from "./types";
 
-/** 余白ブロックが遅れを吸収して縮められる下限（分） */
+/** 余白ブロックが遅れを吸収して縮められる下限（分）の初期値。ペース別の下限は meals.ts の BUFFER_FLOOR_MIN */
 export const MIN_BUFFER_MIN = 10;
 /** 開店まで待ってでも入れる上限（分）。これを超える待ちは営業時間外として扱う */
 export const MAX_WAIT_FOR_OPENING_MIN = 90;
@@ -26,6 +27,8 @@ export interface RecomputeOptions {
   delayMin?: number;
   /** 固定時刻の余裕時間（分） */
   marginMin?: number;
+  /** 余白が縮められる下限（分）。ペース別（meals.ts の BUFFER_FLOOR_MIN）。省略時は MIN_BUFFER_MIN */
+  minBufferMin?: number;
 }
 
 export function isInert(b: Block): boolean {
@@ -67,12 +70,15 @@ function hoursLateBy(spot: Spot, date: string, start: number, duration: number):
  *   間に合わないときは fixed-missed（不足分は lateByMin）を付ける。
  * - 遅延は最初の未開始ブロックの開始を delayMin 遅らせる。余白ブロックが先に縮んで吸収する。
  * - 「疲れた」の休憩（label: rest）は保護され、長さを変えない。
+ * - 食事ブロック（meal）は、食事の窓（MEAL_ADJUST_WINDOW）より前には始めない。窓の終わりを超えるときは outside-meal-window。
+ * - 余白は、元の長さと minBufferMin のうち短いほうまで縮められる。
  * - スキップ済み・臨時休業のブロックは時間を消費しない（表示用の元の時刻は残す）。
  */
 export function recomputeDay(day: Day, ctx: PlanningContext, opts: RecomputeOptions = {}): Day {
   const mode = opts.mode ?? "preserve";
   const now = opts.nowMin;
   const margin = opts.marginMin ?? DEFAULT_MARGIN_MIN;
+  const bufferFloor = (b: Block) => Math.min(opts.minBufferMin ?? MIN_BUFFER_MIN, Math.max(1, b.durationMin));
   const travelFn = dayTravel(day, ctx);
   const src = day.blocks;
   const n = src.length;
@@ -104,7 +110,7 @@ export function recomputeDay(day: Day, ctx: PlanningContext, opts: RecomputeOpti
       continue;
     }
     if (nextLatest === undefined) continue;
-    const duration = b.label === "buffer" ? MIN_BUFFER_MIN : b.durationMin;
+    const duration = b.label === "buffer" ? bufferFloor(b) : b.durationMin;
     latestStart[i] = nextLatest - nextTravel - duration;
     nextLatest = latestStart[i];
     nextTravel = travelIn[i]?.minutes ?? 0;
@@ -185,9 +191,10 @@ export function recomputeDay(day: Day, ctx: PlanningContext, opts: RecomputeOpti
         end = start + b.durationMin;
       } else {
         // 余白: 前の終了時刻から始まり、遅れた分だけ縮んで計画上の終了時刻に合わせる。固定時刻が近いときはさらに縮む
-        end = Math.max(b.plannedEndMin ?? b.endMin, start + MIN_BUFFER_MIN);
+        const floor = bufferFloor(b);
+        end = Math.max(b.plannedEndMin ?? b.endMin, start + floor);
         const ls = latestStart[i];
-        if (ls !== undefined) end = Math.max(start + MIN_BUFFER_MIN, Math.min(end, ls + MIN_BUFFER_MIN));
+        if (ls !== undefined) end = Math.max(start + floor, Math.min(end, ls + floor));
       }
       out.push({
         ...withTravel,
@@ -219,6 +226,8 @@ export function recomputeDay(day: Day, ctx: PlanningContext, opts: RecomputeOpti
       pending = 0;
     }
 
+    if (b.meal) start = Math.max(start, MEAL_ADJUST_WINDOW[b.meal].earliest);
+
     const issues: BlockIssue[] = [];
     let late: number | undefined;
     const slot = findOpenSlot(spotHere, day.date, start, b.durationMin);
@@ -228,6 +237,10 @@ export function recomputeDay(day: Day, ctx: PlanningContext, opts: RecomputeOpti
       late = hoursLateBy(spotHere, day.date, start, b.durationMin);
     }
     const end = start + b.durationMin;
+    if (b.meal && end > MEAL_ADJUST_WINDOW[b.meal].latest) {
+      issues.push("outside-meal-window");
+      late = Math.max(late ?? 0, end - MEAL_ADJUST_WINDOW[b.meal].latest);
+    }
     if (end > day.endMin) issues.push("over-day-end");
     if (afterEnd) issues.push("after-last-transport");
 

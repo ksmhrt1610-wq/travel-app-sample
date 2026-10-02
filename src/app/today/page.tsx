@@ -18,6 +18,7 @@ import { Button, cx, useToast } from "@/components/ui";
 import { suggestReplacement } from "@/core/actions";
 import { absenceByBlock, departureNotices, memberFixedStatuses, nextFixedCountdown } from "@/core/fixed";
 import { describeEvent, isQuietChange, replan, type ReplanEvent, type ReplanResult } from "@/core/replan";
+import type { Suggestion } from "@/core/suggest";
 import { formatDateJa, formatHHMM } from "@/core/time";
 import { getNextAction } from "@/core/today";
 import type { Itinerary } from "@/core/types";
@@ -138,6 +139,15 @@ export default function TodayPage() {
 
   const confirm = () => proposal && commit(proposal.result, proposal.title);
 
+  /** 空きができたときの提案を選ぶ: いまの案を確定してから、その提案を新しい組み直し案にする */
+  const applySuggestion = (s: Suggestion) => {
+    if (!proposal) return;
+    const base = proposal.result.after;
+    commit(proposal.result, proposal.title);
+    const result = replan(base, s.event, ctx, { dayIndex: today.dayIndex, nowMin: today.nowMin });
+    setProposal({ event: s.event, title: describeEvent(s.event, ctx, base), result, removeMustIds: [] });
+  };
+
   const setNow = (min: number) => {
     setProposal(null);
     update((t) => (t.today ? { ...t, today: { ...t.today, nowMin: min } } : t));
@@ -220,6 +230,7 @@ export default function TodayPage() {
             onConfirm={confirm}
             onCancel={() => setProposal(null)}
             onRemoveMust={(blockId) => propose(proposal.event, [...proposal.removeMustIds, blockId])}
+            onApplySuggestion={applySuggestion}
           />
         )}
 
