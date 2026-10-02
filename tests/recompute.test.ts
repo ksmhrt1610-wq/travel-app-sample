@@ -102,6 +102,19 @@ describe("時刻の再計算", () => {
     expect(skipped[1].startMin).toBeLessThanOrEqual(hm(15, 40));
   });
 
+  it("標準ブロックが終了予定時刻を大きく超えるときも、手前の Optional をスキップ候補にして改善できる", () => {
+    const day = makeDay([
+      { id: "opt", label: "optional", spotId: "ohori-tsutaya", start: hm(16), end: hm(17) },
+      { id: "dinner", spotId: "tenjin-ippudo", start: hm(18, 30), end: hm(19, 15) },
+    ]);
+    // 終了予定は 20:00。180分の遅れで夕食は 20:30 を大きく過ぎる
+    const delayed = applyDelay(wrapItinerary(day), 0, 180, hm(15), ctx).days[0].blocks;
+    expect(delayed[1].endMin).toBeGreaterThan(hm(20, 30));
+    expect(delayed[0].skip).toBe("candidate");
+    const skipped = skipAllCandidates(applyDelay(wrapItinerary(day), 0, 180, hm(15), ctx), 0, hm(15), ctx).days[0].blocks;
+    expect(skipped[1].endMin).toBeLessThan(delayed[1].endMin);
+  });
+
   it("営業時間外のブロックは issues に記録される（閉店後に到着）", () => {
     const out = settleDay(
       makeDay([{ id: "x", spotId: "ohori-art", start: hm(16), end: hm(17, 30) }]),

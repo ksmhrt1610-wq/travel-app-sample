@@ -78,9 +78,10 @@ export function findPlanBCandidates(
     const slot = findOpenSlot(c, window.date, window.start, duration);
     if (!slot || slot.start !== window.start) continue; // ブロックの開始時刻にそのまま入れること
 
+    // 興味カテゴリが近いこと（必須条件）。ユーザーの興味に合うものはさらに加点する
     const affinity = categoryAffinity(original, c);
+    if (affinity < MIN_AFFINITY) continue;
     const interestMatch = !!prefs?.interests.includes(c.category);
-    if (affinity < MIN_AFFINITY && !interestMatch) continue;
 
     let score = 3 * affinity;
     if (interestMatch) score += 1;

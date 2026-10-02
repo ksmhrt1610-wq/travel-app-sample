@@ -146,6 +146,9 @@ function failsAny(b: Block): boolean {
   return !isInert(b) && !!b.issues?.some((i) => i === "outside-hours" || i === "over-day-end");
 }
 
+/** 1日の終了予定時刻をこれだけ超えるまでは「許容範囲」とみなす（分） */
+export const DAY_END_TOLERANCE_MIN = 30;
+
 export interface SkipAnalysisOptions {
   nowMin: number;
 }
@@ -154,8 +157,8 @@ export interface SkipAnalysisOptions {
  * スキップ候補の判定（当日モード用）。再計算済みの Day を渡す。
  *
  * 1. 営業時間や終了時刻に間に合わない Optional ブロック → スキップ候補
- * 2. 営業時間に間に合わない Must / 標準ブロックがあるときは、手前の Optional を飛ばせば
- *    間に合うかを試算し、改善する Optional を（近い順に）スキップ候補にする
+ * 2. 営業時間に間に合わない、または終了予定時刻を大きく（30分超）超える Must / 標準ブロックがあるときは、
+ *    手前の Optional を飛ばせば改善するかを試算し、改善する Optional を（近い順に）スキップ候補にする
  * 「それでも行く」（keepAnyway）が付いたブロックは候補にしない。
  */
 export function markSkipCandidates(day: Day, ctx: PlanningContext, opts: SkipAnalysisOptions): Day {
@@ -168,7 +171,7 @@ export function markSkipCandidates(day: Day, ctx: PlanningContext, opts: SkipAna
     if (b.label === "optional" && !b.keepAnyway && !started(b) && failsAny(b)) candidates.add(b.id);
   }
 
-  // 2. 手前の Optional を飛ばせば間に合うか
+  // 2. 手前の Optional を飛ばせば、後ろの Must / 標準が間に合うようになるか
   const simulate = (skipIds: Set<string>): Day =>
     recomputeDay(
       {
@@ -178,12 +181,16 @@ export function markSkipCandidates(day: Day, ctx: PlanningContext, opts: SkipAna
       ctx,
       { mode: "preserve", nowMin: opts.nowMin },
     );
-  const badCount = (d: Day) => d.blocks.filter((b) => failsHours(b) && b.label !== "optional" && !started(b)).length;
+  const overrun = (b: Block) => Math.max(0, b.endMin - (day.endMin + DAY_END_TOLERANCE_MIN));
+  const isCore = (b: Block) => b.label !== "optional" && !started(b) && !isInert(b);
+  /** 大きいほど悪い: 営業時間に間に合わない予定は重く、終了予定時刻の超過は超過分（分）で数える */
+  const badness = (d: Day) =>
+    d.blocks.filter(isCore).reduce((n, b) => n + (failsHours(b) ? 10000 : 0) + overrun(b), 0);
 
   let sim = simulate(candidates);
-  let bad = badCount(sim);
+  let bad = badness(sim);
   while (bad > 0) {
-    const firstBadIdx = sim.blocks.findIndex((b) => failsHours(b) && b.label !== "optional" && !started(b));
+    const firstBadIdx = sim.blocks.findIndex((b) => isCore(b) && (failsHours(b) || overrun(b) > 0));
     const pool = blocks
       .map((b, i) => ({ b, i }))
       .filter(
@@ -194,10 +201,10 @@ export function markSkipCandidates(day: Day, ctx: PlanningContext, opts: SkipAna
     let improved = false;
     for (const { b } of pool) {
       const trial = simulate(new Set([...candidates, b.id]));
-      if (badCount(trial) < bad) {
+      if (badness(trial) < bad) {
         candidates.add(b.id);
         sim = trial;
-        bad = badCount(trial);
+        bad = badness(trial);
         improved = true;
         break;
       }
